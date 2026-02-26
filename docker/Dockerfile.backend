@@ -1,0 +1,26 @@
+FROM python:3.12.3-slim
+
+WORKDIR /app
+
+ENV UV_PROJECT_ENVIRONMENT="/usr/local/"
+ENV UV_COMPILE_BYTECODE=1
+ENV PYTHONPATH="."
+ENV TZ="Asia/Shanghai"
+ENV PIP_DEFAULT_TIMEOUT=120
+ENV PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+ENV PIP_TRUSTED_HOST="pypi.tuna.tsinghua.edu.cn"
+
+# 安装系统依赖 (psycopg2 需要 libpq)
+COPY pyproject.toml .
+COPY uv.lock .
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir uv
+RUN uv sync --frozen --no-install-project --no-dev
+
+# 复制后端源码
+COPY tech_mgmt_ai/ ./tech_mgmt_ai/
+COPY .env.example .env
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "tech_mgmt_ai.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
