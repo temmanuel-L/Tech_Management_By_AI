@@ -84,11 +84,17 @@ class CodeReviewResult(BaseModel):
     """
     LLM 代码审查结果 (用于 bind_tools 结构化输出)
     """
-    quality_score: int = Field(5, ge=1, le=10, description="代码质量评分 (1-10)")
+    quality_score: int = Field(5, ge=1, le=10, description="代码整体质量评分，1=极差，5=一般，10=优秀")
     issues: List[CodeReviewIssue] = Field(default_factory=list, description="发现的问题列表")
-    is_paying_debt: bool = Field(False, description="是否在偿还技术债")
-    is_creating_debt: bool = Field(False, description="是否在引入新技术债")
-    summary: str = Field("", description="一句话总结")
+    is_paying_debt: bool = Field(
+        False,
+        description="是否在偿还旧技术债：修复bug、重构优化、清理冗余、改进架构、消除警告等正向改进"
+    )
+    is_creating_debt: bool = Field(
+        False,
+        description="是否在引入新技术债：硬编码、重复代码、缺乏注释、命名不规范、引入安全风险、遗留待办等"
+    )
+    summary: str = Field("", description="一句话总结 (中文)")
 
 
 def review_code_diff(

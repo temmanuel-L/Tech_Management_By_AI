@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期: 启动时初始化数据库"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     init_db()
+    logger.info(f"默认 LLM 模型: {settings.DEFAULT_MODEL}")
     logger.info("tech_mgmt_ai API 启动完成")
     yield
     logger.info("tech_mgmt_ai API 关闭")

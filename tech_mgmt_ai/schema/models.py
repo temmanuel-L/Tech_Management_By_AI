@@ -56,12 +56,12 @@ class ZhipuModelName(StrEnum):
 
 class OllamaModelName(StrEnum):
     """本地 Ollama 模型 https://ollama.com/search"""
-    OLLAMA_GENERIC = "qwen2.5:14b"     # 默认本地模型, 可通过 OLLAMA_MODEL 覆盖
+    OLLAMA_GENERIC = "alibayram/Qwen3-30B-A3B-Instruct-2507:latest"     # 默认本地模型, 可通过 OLLAMA_MODEL 覆盖
 
 
 class OpenAICompatibleName(StrEnum):
     """兼容 OpenAI API 格式的第三方服务"""
-    COMPATIBLE_DEFAULT = "default"      # 占位, 实际模型名由 COMPATIBLE_MODEL 环境变量决定
+    COMPATIBLE_DEFAULT = "MiniMax-M2.5-highspeed"      # 占位, 实际模型名由 COMPATIBLE_MODEL 环境变量决定
 
 
 # 所有对话 LLM 枚举的联合类型, 用于 get_model() 的类型标注

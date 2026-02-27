@@ -148,9 +148,9 @@ class Settings(BaseSettings):
     # LLM 增强利息率时的权重 (0-1), 越大越偏向 LLM 判断
     TECH_DEBT_LLM_WEIGHT: float = 0.60
     # 每次分析中, 参与 LLM 抽样审查的最大 MR 数量 (异步并发, 可适当提高)
-    TECH_DEBT_LLM_MR_SAMPLE_LIMIT: int = 2
+    TECH_DEBT_LLM_MR_SAMPLE_LIMIT: int = 3
     # 每次分析中, 参与 LLM 抽样审查的最大 Commit 数量 (异步并发, 可支持几十个)
-    TECH_DEBT_LLM_COMMIT_SAMPLE_LIMIT: int = 3
+    TECH_DEBT_LLM_COMMIT_SAMPLE_LIMIT: int = 5
 
     # =========================================================================
     # 数学模型系数 — DORA 指标
@@ -230,9 +230,9 @@ class Settings(BaseSettings):
         """
         # 服务商 → 可用性检测条件
         provider_checks: dict[Provider, Any] = {
+            Provider.OPENAI_COMPATIBLE: self.COMPATIBLE_BASE_URL and self.COMPATIBLE_MODEL,
             Provider.OLLAMA: self.OLLAMA_MODEL,
             Provider.ZHIPU: self.ZHIPU_API_KEY,
-            Provider.OPENAI_COMPATIBLE: self.COMPATIBLE_BASE_URL and self.COMPATIBLE_MODEL,
             Provider.OPENAI: self.OPENAI_API_KEY,
             Provider.DEEPSEEK: self.DEEPSEEK_API_KEY,
             Provider.ANTHROPIC: self.ANTHROPIC_API_KEY,
@@ -250,30 +250,33 @@ class Settings(BaseSettings):
             )
             return
 
-        # 注册每个活跃服务商的可用模型
-        provider_to_models = {
-            Provider.OPENAI: set(OpenAIModelName),
-            Provider.DEEPSEEK: set(DeepseekModelName),
-            Provider.ANTHROPIC: set(AnthropicModelName),
-            Provider.ZHIPU: set(ZhipuModelName),
-            Provider.OLLAMA: set(OllamaModelName),
-            Provider.OPENAI_COMPATIBLE: set(OpenAICompatibleName),
-        }
-
-        provider_defaults = {
-            Provider.OPENAI: OpenAIModelName.GPT_4O_MINI,
-            Provider.DEEPSEEK: DeepseekModelName.DEEPSEEK_CHAT,
-            Provider.ANTHROPIC: AnthropicModelName.CLAUDE_HAIKU_35,
-            Provider.ZHIPU: ZhipuModelName.GLM_4_FLASH,
-            Provider.OLLAMA: OllamaModelName.OLLAMA_GENERIC,
-            Provider.OPENAI_COMPATIBLE: OpenAICompatibleName.COMPATIBLE_DEFAULT,
-        }
-
+        # 注册每个活跃服务商的可用模型及默认值
         for provider in active_providers:
-            if provider in provider_to_models:
-                self.AVAILABLE_MODELS.update(provider_to_models[provider])
-                if self.DEFAULT_MODEL is None:
-                    self.DEFAULT_MODEL = provider_defaults.get(provider)
+            match provider:
+                case Provider.OPENAI:
+                    if self.DEFAULT_MODEL is None:
+                        self.DEFAULT_MODEL = OpenAIModelName.GPT_4O_MINI
+                    self.AVAILABLE_MODELS.update(set(OpenAIModelName))
+                case Provider.DEEPSEEK:
+                    if self.DEFAULT_MODEL is None:
+                        self.DEFAULT_MODEL = DeepseekModelName.DEEPSEEK_CHAT
+                    self.AVAILABLE_MODELS.update(set(DeepseekModelName))
+                case Provider.ANTHROPIC:
+                    if self.DEFAULT_MODEL is None:
+                        self.DEFAULT_MODEL = AnthropicModelName.CLAUDE_HAIKU_35
+                    self.AVAILABLE_MODELS.update(set(AnthropicModelName))
+                case Provider.ZHIPU:
+                    if self.DEFAULT_MODEL is None:
+                        self.DEFAULT_MODEL = ZhipuModelName.GLM_4_FLASH
+                    self.AVAILABLE_MODELS.update(set(ZhipuModelName))
+                case Provider.OPENAI_COMPATIBLE:
+                    if self.DEFAULT_MODEL is None:
+                        self.DEFAULT_MODEL = OpenAICompatibleName.COMPATIBLE_DEFAULT
+                    self.AVAILABLE_MODELS.update(set(OpenAICompatibleName))
+                case Provider.OLLAMA:
+                    if self.DEFAULT_MODEL is None:
+                        self.DEFAULT_MODEL = OllamaModelName.OLLAMA_GENERIC
+                    self.AVAILABLE_MODELS.update(set(OllamaModelName))
 
     @property
     def gitlab_project_id_list(self) -> list[int]:
