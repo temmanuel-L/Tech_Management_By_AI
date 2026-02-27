@@ -41,12 +41,12 @@ from tech_mgmt_ai.models.tech_debt import TechDebtResult
 
 logger = logging.getLogger(__name__)
 
-# 团队状态 → 归一化分数的映射
+# 团队状态 → 综合健康分中的团队状态得分 (25/50/75/100)
 _STATE_SCORES: dict[TeamState, float] = {
-    TeamState.INNOVATING: 1.0,
-    TeamState.PAYING_DOWN_DEBT: 0.66,
-    TeamState.TREADING_WATER: 0.33,
-    TeamState.FALLING_BEHIND: 0.0,
+    TeamState.FALLING_BEHIND: 25.0,
+    TeamState.TREADING_WATER: 50.0,
+    TeamState.PAYING_DOWN_DEBT: 75.0,
+    TeamState.INNOVATING: 100.0,
 }
 
 
@@ -58,18 +58,37 @@ class HealthScoreResult:
     Attributes:
         score: 综合健康分 (0-100)
         level: 等级 (excellent / good / attention / danger)
-        dora_contribution: DORA 维度的贡献分
-        debt_contribution: 技术债维度的贡献分
-        hero_contribution: 英雄检测维度的贡献分
-        state_contribution: 团队状态维度的贡献分
+        # 维度原始得分 (0-100, 不含权重), 便于前端直接以百分制展示
+        dora_score: float
+        debt_score: float
+        hero_score: float
+        state_score: float
+        # 维度贡献分 (已乘以权重后的得分, 便于诊断谁拖后腿)
+        dora_contribution: float
+        debt_contribution: float
+        hero_contribution: float
+        state_contribution: float
+        # 各维度权重 (0-1), 便于前端标注
+        w_dora: float
+        w_debt: float
+        w_hero: float
+        w_state: float
         description: 可读的综合描述
     """
     score: float = 0.0
     level: str = "danger"
+    dora_score: float = 0.0
+    debt_score: float = 0.0
+    hero_score: float = 0.0
+    state_score: float = 0.0
     dora_contribution: float = 0.0
     debt_contribution: float = 0.0
     hero_contribution: float = 0.0
     state_contribution: float = 0.0
+    w_dora: float = 0.0
+    w_debt: float = 0.0
+    w_hero: float = 0.0
+    w_state: float = 0.0
     description: str = ""
 
 
@@ -100,14 +119,12 @@ def calculate_health_score(
         HealthScoreResult: 综合健康分及各维度贡献
     """
     # 各维度的归一化分数 (0-1, 越高越健康)
-    # 如果某维度缺数据, 使用中性值 0.5 (不影响判断)
+    # 团队状态: 落后25/停滞50/偿债75/创新100 → 除以100 用于加权
     dora_score = dora.overall_score if dora else 0.5
     debt_score = 1.0 - (tech_debt.interest_rate if tech_debt else 0.5)
     hero_score = 1.0 - (hero.gini_coefficient if hero else 0.5)
-    state_score = (
-        _STATE_SCORES.get(team_state.state, 0.5)
-        if team_state else 0.5
-    )
+    state_score_pct = _STATE_SCORES.get(team_state.state, 50) if team_state else 50
+    state_score = state_score_pct / 100.0
 
     # 加权聚合
     raw_score = (
@@ -135,18 +152,24 @@ def calculate_health_score(
         level = "danger"
         level_label = "危险"
 
-    # 各维度贡献 (用于分析哪个维度拖后腿)
-    dora_contrib = settings.HEALTH_W_DORA * dora_score * 100
-    debt_contrib = settings.HEALTH_W_DEBT * debt_score * 100
-    hero_contrib = settings.HEALTH_W_HERO * hero_score * 100
-    state_contrib = settings.HEALTH_W_STATE * state_score * 100
+    # 维度原始得分 (0-100, 不含权重)
+    dora_score_pct = dora_score * 100
+    debt_score_pct = debt_score * 100
+    hero_score_pct = hero_score * 100
+    # state_score_pct 已是 25/50/75/100
+
+    # 各维度贡献 (已乘以权重, 用于分析哪个维度拖后腿)
+    dora_contrib = settings.HEALTH_W_DORA * dora_score_pct
+    debt_contrib = settings.HEALTH_W_DEBT * debt_score_pct
+    hero_contrib = settings.HEALTH_W_HERO * hero_score_pct
+    state_contrib = settings.HEALTH_W_STATE * state_score_pct
 
     desc_parts = [
         f"📊 综合健康分: {health:.0f}/100 【{level_label}】",
-        f"  · DORA 效能: {dora_contrib:.1f}分 (权重 {settings.HEALTH_W_DORA:.0%})",
-        f"  · 技术债健康: {debt_contrib:.1f}分 (权重 {settings.HEALTH_W_DEBT:.0%})",
-        f"  · 协作均衡: {hero_contrib:.1f}分 (权重 {settings.HEALTH_W_HERO:.0%})",
-        f"  · 团队状态: {state_contrib:.1f}分 (权重 {settings.HEALTH_W_STATE:.0%})",
+        f"  · DORA 效能: {dora_score_pct:.1f}分 (权重 {settings.HEALTH_W_DORA:.0%}, 贡献 {dora_contrib:.1f})",
+        f"  · 技术债健康: {debt_score_pct:.1f}分 (权重 {settings.HEALTH_W_DEBT:.0%}, 贡献 {debt_contrib:.1f})",
+        f"  · 协作均衡: {hero_score_pct:.1f}分 (权重 {settings.HEALTH_W_HERO:.0%}, 贡献 {hero_contrib:.1f})",
+        f"  · 团队状态: {state_score_pct:.1f}分 (权重 {settings.HEALTH_W_STATE:.0%}, 贡献 {state_contrib:.1f})",
     ]
 
     logger.info(f"综合健康分: {health:.0f}/100 ({level})")
@@ -154,9 +177,17 @@ def calculate_health_score(
     return HealthScoreResult(
         score=health,
         level=level,
+        dora_score=dora_score_pct,
+        debt_score=debt_score_pct,
+        hero_score=hero_score_pct,
+        state_score=state_score_pct,
         dora_contribution=dora_contrib,
         debt_contribution=debt_contrib,
         hero_contribution=hero_contrib,
         state_contribution=state_contrib,
+        w_dora=settings.HEALTH_W_DORA,
+        w_debt=settings.HEALTH_W_DEBT,
+        w_hero=settings.HEALTH_W_HERO,
+        w_state=settings.HEALTH_W_STATE,
         description="\n".join(desc_parts),
     )

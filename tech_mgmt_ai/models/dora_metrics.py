@@ -232,8 +232,9 @@ def calculate_dora_metrics(
     # 部署失败次数 / 总部署次数
     failed_deploys = [p for p in deploy_pipelines if p.status == "failed"]
     total_deploys = len(deploy_pipelines)
-    cfr = len(failed_deploys) / max(total_deploys, 1)
-    cfr_level = _classify_cfr(cfr)
+    cfr = len(failed_deploys) / max(total_deploys, 1) if total_deploys > 0 else 0.0
+    # 注意: 当没有任何部署 Pipeline 时, 无法客观评估失败率, 这里采用“中性”评级
+    cfr_level = _classify_cfr(cfr) if total_deploys > 0 else DORALevel.MEDIUM
 
     # === 4. MTTR ===
     # 估算恢复时间: 寻找 "失败→成功" 的 Pipeline 对, 计算时间差
@@ -253,7 +254,8 @@ def calculate_dora_metrics(
         sum(mttr_hours_list) / len(mttr_hours_list)
         if mttr_hours_list else 0.0
     )
-    mttr_level = _classify_mttr(avg_mttr)
+    # 同理, 没有任何“失败→成功”的恢复样本时, MTTR 也视为“中性”评级
+    mttr_level = _classify_mttr(avg_mttr) if mttr_hours_list else DORALevel.MEDIUM
 
     # === 综合评分 ===
     # 四指标各自的 score (0-1) 取平均
@@ -264,12 +266,20 @@ def calculate_dora_metrics(
     overall_level = sorted_levels[1]  # 取中位偏低值, 保守评估
 
     # === 生成描述 ===
+    no_deploy_data = total_deploys == 0
+    if no_deploy_data:
+        cfr_desc = "无部署数据, 无法评估 → 中性评级"
+        mttr_desc = "无故障恢复数据, 无法评估 → 中性评级"
+    else:
+        cfr_desc = f"{cfr:.1%} → {cfr_level.label}级"
+        mttr_desc = f"{avg_mttr:.1f}h → {mttr_level.label}级"
+
     desc_parts = [
         f"📊 DORA 综合评级: 【{overall_level.label}】(得分 {overall_score:.2f})",
         f"  · 变更前置时间: {avg_lead_time:.1f}h → {lead_time_level.label}级",
         f"  · 部署频率: {deploy_freq:.2f}次/天 → {deploy_freq_level.label}级",
-        f"  · 变更失败率: {cfr:.1%} → {cfr_level.label}级",
-        f"  · 平均恢复时间: {avg_mttr:.1f}h → {mttr_level.label}级",
+        f"  · 变更失败率: {cfr_desc}",
+        f"  · 平均恢复时间: {mttr_desc}",
     ]
     description = "\n".join(desc_parts)
 

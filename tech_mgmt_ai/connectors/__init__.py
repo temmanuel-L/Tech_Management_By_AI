@@ -40,6 +40,7 @@ class MergeRequestInfo:
     created_at: datetime           # 创建时间
     merged_at: datetime | None     # 合并时间 (未合并时为 None)
     diff: str = ""                 # Diff 内容 (用于 LLM 代码Review)
+    description: str = ""          # 作者说明/描述 (与 diff 一并推给 LLM)
     reviewers: list[str] = field(default_factory=list)  # 参与Review的人
     comments_count: int = 0        # 评论数
 

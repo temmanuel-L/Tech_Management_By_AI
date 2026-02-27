@@ -118,14 +118,14 @@ class Settings(BaseSettings):
     #   S ≥ threshold_innovating             → Innovating (创新)
     # =========================================================================
 
-    # 积压趋势权重: 需求积压增减, 反映团队交付能力与需求的匹配度
-    TEAM_STATE_W_BACKLOG: float = 0.30
-    # 技术债占比权重: 修复/偿债类任务在总任务中的比例
-    TEAM_STATE_W_DEBT: float = 0.25
-    # 士气代理权重: 通过 Code Review 参与度间接衡量团队活跃度
-    TEAM_STATE_W_MORALE: float = 0.20
-    # 创新占比权重: Feature 类任务占总任务的比例
-    TEAM_STATE_W_INNOVATION: float = 0.25
+    # 五维权重 (含代码健康时共六维), 总和=1.0
+    # 各子指标值域: 积压约[-1,1], 偿债/士气/创新[0,1], 新增债[-1,0], 代码健康[0,1]
+    TEAM_STATE_W_BACKLOG: float = 0.25
+    TEAM_STATE_W_DEBT: float = 0.20
+    TEAM_STATE_W_MORALE: float = 0.15
+    TEAM_STATE_W_INNOVATION: float = 0.20
+    TEAM_STATE_W_CREATING_DEBT: float = 0.10
+    TEAM_STATE_W_CODE_HEALTH: float = 0.10  # 有 LLM 时参与, 无时用 0.5 中性
 
     # 状态判定阈值
     TEAM_STATE_THRESHOLD_FALLING_BEHIND: float = -0.3
@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     TECH_DEBT_DANGER_THRESHOLD: float = 0.50
     # 识别修复类 Commit 的关键词 (逗号分隔)
     TECH_DEBT_FIX_KEYWORDS: str = "fix,bugfix,hotfix,patch,repair,resolve"
+    # LLM 增强利息率时的权重 (0-1), 越大越偏向 LLM 判断
+    TECH_DEBT_LLM_WEIGHT: float = 0.60
+    # 每次分析中, 参与 LLM 抽样审查的最大 MR 数量 (异步并发, 可适当提高)
+    TECH_DEBT_LLM_MR_SAMPLE_LIMIT: int = 2
+    # 每次分析中, 参与 LLM 抽样审查的最大 Commit 数量 (异步并发, 可支持几十个)
+    TECH_DEBT_LLM_COMMIT_SAMPLE_LIMIT: int = 3
 
     # =========================================================================
     # 数学模型系数 — DORA 指标

@@ -60,6 +60,7 @@ class GitLabConnector(BaseConnector):
 
         GitLab API 默认每页 20 条, 此方法自动遍历所有页面。
         """
+        logger.debug(f"GitLab API 请求: {path}, params: {params}")
         results: list[dict] = []
         page = 1
         per_page = 100  # 最大每页条数
@@ -82,6 +83,11 @@ class GitLabConnector(BaseConnector):
                 break
 
             data = resp.json()
+            # 打印第一条原始数据（方便调试字段映射）
+            if page == 1 and results == [] and isinstance(data, list) and len(data) > 0:
+                logger.info(f"=== GitLab API 原始数据: {path} ===")
+                logger.info(f"  第一条: {data[0]}")
+
             if not isinstance(data, list):
                 # 某些接口返回单个对象
                 results.append(data)
@@ -150,6 +156,8 @@ class GitLabConnector(BaseConnector):
         )
         return all_commits
 
+        return all_commits
+
     def fetch_merge_requests(
         self,
         state: str = "all",
@@ -214,11 +222,22 @@ class GitLabConnector(BaseConnector):
                     created_at=self._parse_datetime(mr.get("created_at")) or datetime.now(),
                     merged_at=self._parse_datetime(mr.get("merged_at")),
                     diff=diff_text,
+                    description=mr.get("description", "") or "",
                     reviewers=reviewers,
                     comments_count=mr.get("user_notes_count", 0),
                 ))
 
         logger.info(f"GitLab: 获取 {len(all_mrs)} 条 Merge Requests")
+
+        # 打印前 3 条 MRs 样例
+        if all_mrs:
+            sample = all_mrs[:3]
+            logger.info(f"=== MergeRequests 样例 (共 {len(all_mrs)} 条) ===")
+            for i, mr in enumerate(sample):
+                logger.info(f"  [{i+1}] id={mr.id}, title={mr.title[:40]}, "
+                           f"author={mr.author}, state={mr.state}, "
+                           f"merged_at={mr.merged_at}, comments={mr.comments_count}")
+
         return all_mrs
 
     def fetch_pipelines(
@@ -239,9 +258,10 @@ class GitLabConnector(BaseConnector):
         for pid in self.project_ids:
             params: dict = {}
             if since:
-                params["updated_after"] = since.isoformat()
+                # 优先用 created_after，回退到 updated_after
+                params["created_after"] = since.isoformat()
             if until:
-                params["updated_before"] = until.isoformat()
+                params["created_before"] = until.isoformat()
 
             raw_pipelines = self._get(f"/projects/{pid}/pipelines", params)
 
@@ -272,6 +292,15 @@ class GitLabConnector(BaseConnector):
                 ))
 
         logger.info(f"GitLab: 获取 {len(all_pipelines)} 条 Pipelines")
+
+        # 打印前 3 条 Pipelines 样例
+        if all_pipelines:
+            sample = all_pipelines[:3]
+            logger.info(f"=== Pipelines 样例 (共 {len(all_pipelines)} 条) ===")
+            for i, p in enumerate(sample):
+                logger.info(f"  [{i+1}] id={p.id}, status={p.status}, "
+                           f"is_deployment={p.is_deployment}, duration={p.duration_seconds:.0f}s")
+
         return all_pipelines
 
     def fetch_tasks(

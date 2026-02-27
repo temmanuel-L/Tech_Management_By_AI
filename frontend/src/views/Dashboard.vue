@@ -47,9 +47,15 @@
           <div class="breakdown-item" v-for="item in healthBreakdown" :key="item.label">
             <span class="breakdown-label">{{ item.label }}</span>
             <div class="breakdown-bar-wrapper">
-              <div class="breakdown-bar" :style="{ width: item.pct + '%', background: item.color }"></div>
+              <div class="breakdown-bar" :style="{ width: item.value + '%', background: item.color }"></div>
             </div>
-            <span class="breakdown-value">{{ item.value.toFixed(1) }}</span>
+            <span class="breakdown-value">
+              {{ item.value.toFixed(1) }}
+              <span style="color: var(--text-muted); font-size: 0.7rem;">
+                (权重 {{ (item.weight * 100).toFixed(0) }}%)
+              </span>
+            </span>
+            <div class="breakdown-tooltip" v-if="item.tip">{{ item.tip }}</div>
           </div>
         </div>
       </div>
@@ -66,9 +72,14 @@
         </div>
         <div class="state-dimensions">
           <div class="dim-item" v-for="dim in stateDimensions" :key="dim.label">
-            <span class="dim-label">{{ dim.label }}</span>
+            <span class="dim-label">{{ dim.label }} <span class="dim-range">({{ dim.range }})</span></span>
             <span class="dim-value" :class="dim.cls">{{ dim.value }}</span>
+            <div class="dim-tooltip" v-if="dim.tip">{{ dim.tip }}</div>
           </div>
+        </div>
+        <div class="state-calc-note">
+          <div class="state-ranges">{{ stateScoreRanges }}</div>
+          <div class="state-explanation">{{ stateCalcExplanation }}</div>
         </div>
         <p class="state-desc">{{ data.team_state.description }}</p>
       </div>
@@ -76,7 +87,7 @@
       <!-- DORA 指标 -->
       <div class="card">
         <div class="card-header">
-          <h3>DORA 效能指标</h3>
+          <h3>DORA 四指标原始值</h3>
           <span class="badge" :class="'badge-dora-' + data.dora.overall_level">
             {{ data.dora.overall_level.toUpperCase() }}
           </span>
@@ -88,6 +99,9 @@
             <div class="dora-value">{{ metric.value }}</div>
           </div>
         </div>
+        <p class="dora-note">
+          本卡片展示 DORA 四指标原始值 (变更前置时间来自 MR, 其余依赖 Pipelines)。综合健康分中的「研发效能」= 本卡片四指标的综合得分 (0-100)。
+        </p>
       </div>
 
       <!-- 技术债 -->
@@ -106,9 +120,14 @@
             <div class="debt-threshold danger" style="left: 50%"></div>
           </div>
           <div class="debt-stats">
-            <span>修复 Commits: {{ data.tech_debt.fix_commit_count }}</span>
-            <span>总 Commits: {{ data.tech_debt.total_commit_count }}</span>
+            <span>涉及偿还技术债的提交数 / 总提交数: {{ data.tech_debt.fix_commit_count }}/{{ data.tech_debt.total_commit_count }}</span>
+            <span v-if="data.tech_debt.llm_enhanced">
+              LLM 偿债: {{ data.tech_debt.llm_paying_debt_count }}/{{ data.tech_debt.llm_reviewed_mr_count + data.tech_debt.llm_reviewed_commit_count }}
+            </span>
           </div>
+          <p class="debt-calc-note" v-if="data.tech_debt.interest_rate_calc_note">
+            {{ data.tech_debt.interest_rate_calc_note }}
+          </p>
         </div>
       </div>
 
@@ -221,20 +240,20 @@ function renderTrend() {
       labels,
       datasets: [
         {
-          label: '健康分',
+          label: '综合健康分',
           data: history.value.map(h => h.health_score),
           borderColor: '#43e97b',
           backgroundColor: 'rgba(67, 233, 123, 0.1)',
           fill: true, tension: 0.4,
         },
         {
-          label: 'DORA 得分 (×100)',
+          label: '研发效能 (DORA, ×100)',
           data: history.value.map(h => h.dora_overall_score * 100),
           borderColor: '#42a5f5',
           tension: 0.4,
         },
         {
-          label: '技术债率 (×100)',
+          label: '技术债利息率 (×100)',
           data: history.value.map(h => h.tech_debt_interest_rate * 100),
           borderColor: '#ffa726',
           tension: 0.4,
@@ -255,16 +274,21 @@ function renderTrend() {
   })
 }
 
-// 健康分维度分解
+// 健康分维度分解 (技术债健康度 = 1-利息率, 0-100 越高越健康)
+const HEALTH_BREAKDOWN_TIPS = {
+  '研发效能 (DORA)': '数据: MR 变更前置时间、Pipelines 部署频率/变更失败率/MTTR。计算: 四指标各自按等级映射 (Low=0.25, Medium=0.5, High=0.75, Elite=1.0)，取算术平均后×100 得 0-100 分；卡片上的综合等级(如 MEDIUM)仅作展示，分数由四指标平均决定，故可能为 50~75 等中间值。权重 30%。',
+  '技术债健康度': '数据: Commits 涉及偿还技术债的提交、LLM 偿债/新增债判定。计算: 健康度 = 1 - 技术债利息率，0-100 越高越健康，权重 25%。',
+  '协作均衡': '数据: Commits 作者分布。计算: 1 - 基尼系数，0-100 越均匀越好，权重 20%。',
+  '团队状态': '数据: Issues/MR/LLM 审查。计算: 四状态映射为 0-100 分，权重 25%。',
+}
 const healthBreakdown = computed(() => {
   if (!data.value) return []
   const h = data.value.health
-  const max = 30 // 最大可能贡献
   return [
-    { label: 'DORA 效能', value: h.dora_contribution, pct: (h.dora_contribution / max) * 100, color: 'var(--accent-blue)' },
-    { label: '技术债', value: h.debt_contribution, pct: (h.debt_contribution / max) * 100, color: 'var(--accent-orange)' },
-    { label: '协作均衡', value: h.hero_contribution, pct: (h.hero_contribution / max) * 100, color: 'var(--accent-purple)' },
-    { label: '团队状态', value: h.state_contribution, pct: (h.state_contribution / max) * 100, color: 'var(--accent-green)' },
+    { label: '研发效能 (DORA)', value: h.dora_score, weight: h.w_dora, color: 'var(--accent-blue)', tip: HEALTH_BREAKDOWN_TIPS['研发效能 (DORA)'] },
+    { label: '技术债健康度', value: h.debt_score, weight: h.w_debt, color: 'var(--accent-orange)', tip: HEALTH_BREAKDOWN_TIPS['技术债健康度'] },
+    { label: '协作均衡', value: h.hero_score, weight: h.w_hero, color: 'var(--accent-purple)', tip: HEALTH_BREAKDOWN_TIPS['协作均衡'] },
+    { label: '团队状态', value: h.state_score, weight: h.w_state, color: 'var(--accent-green)', tip: HEALTH_BREAKDOWN_TIPS['团队状态'] },
   ]
 })
 
@@ -280,16 +304,68 @@ const doraMetrics = computed(() => {
   ]
 })
 
-// 团队状态维度
+// 团队状态各子指标: 值域、数据来源与计算逻辑 (用于 tooltip)
+const STATE_DIM_META = {
+  积压趋势: {
+    range: '[-1,1] 正值=积压减少 负值=增加',
+    tip: '数据: Issues 的 tasks_closed/tasks_created/total_backlog，或 MR 的 merged_count/total_mr_count。计算: 有 Issues 时 (关闭-新增)/积压 截断至[-1,1]；无 Issues 时 2×MR合并率-1 映射到[-1,1]。',
+  },
+  偿债占比: {
+    range: '[-1,1] 0.4 最优，过高或过低均降分',
+    tip: '数据: LLM 偿债数/总审查数，或 Issues 债务任务占比。计算: 偿债占比 0.4 时得分 1，0 时 -0.1，1 时 -1；[0,0.4] 单调增，(0.4,1] 单调减。',
+  },
+  士气: {
+    range: '[-1,1] 越高越好 (0=中性)',
+    tip: '数据: MR 的 comments_count、team_size。计算: 2×(reviews/team/5)-1 映射到[-1,1]。',
+  },
+  创新占比: {
+    range: '[-1,1] 越高越好 (0=中性)',
+    tip: '数据: LLM 或 Issues。计算: 2×创新占比-1 映射到[-1,1]，-1=无创新 1=全创新。',
+  },
+  新增技术债任务占比: {
+    range: '[-1,0] 越近0越好',
+    tip: '数据: LLM 审查的 is_creating_debt 判定。计算: -(llm_creating_debt_count/llm_total_reviews)，取负影响，权重 10%。',
+  },
+}
+// 团队状态维度 (新增技术债任务占比 有 LLM 时常显)
 const stateDimensions = computed(() => {
   if (!data.value) return []
   const s = data.value.team_state
-  return [
-    { label: '积压趋势', value: s.backlog_score?.toFixed(3) || '-', cls: s.backlog_score >= 0 ? 'positive' : 'negative' },
-    { label: '技术债', value: s.debt_score?.toFixed(3) || '-', cls: s.debt_score >= 0 ? 'positive' : 'negative' },
-    { label: '士气', value: s.morale_score?.toFixed(3) || '-', cls: 'neutral' },
-    { label: '创新占比', value: s.innovation_score?.toFixed(3) || '-', cls: 'positive' },
+  const dims = [
+    { label: '积压趋势', ...STATE_DIM_META.积压趋势, value: s.backlog_score?.toFixed(3) ?? '-', cls: (s.backlog_score ?? 0) >= 0 ? 'positive' : 'negative' },
+    { label: '偿债占比', ...STATE_DIM_META.偿债占比, value: s.debt_score?.toFixed(3) ?? '-', cls: (s.debt_score ?? 0) >= 0 ? 'positive' : 'negative' },
+    { label: '士气', ...STATE_DIM_META.士气, value: s.morale_score?.toFixed(3) ?? '-', cls: (s.morale_score ?? 0) >= 0 ? 'positive' : 'negative' },
+    { label: '创新占比', ...STATE_DIM_META.创新占比, value: s.innovation_score?.toFixed(3) ?? '-', cls: 'positive' },
   ]
+  // 始终显示新增技术债任务占比 (无 LLM 时为 0)
+  dims.push({
+    label: '新增技术债任务占比',
+    ...STATE_DIM_META.新增技术债任务占比,
+    value: (s.creating_debt_score ?? 0).toFixed(3),
+    cls: 'negative',
+  })
+  return dims
+})
+// 加权得分分箱说明 (API 未返回时使用默认)
+const stateScoreRanges = computed(() => {
+  const s = data.value?.team_state?.score_ranges
+  return s && s.trim() ? s : '得分区间: 落后 S<-0.3 | 停滞 -0.3≤S<0 | 偿债 0≤S<0.3 | 创新 S≥0.3'
+})
+// 加权计算过程 (API 未返回时根据当前值拼接)
+const stateCalcExplanation = computed(() => {
+  const s = data.value?.team_state
+  if (!s) return ''
+  const expl = s.calc_explanation
+  if (expl && expl.trim()) return expl
+  const parts = [
+    `积压=${(s.backlog_score ?? 0).toFixed(3)}`,
+    `偿债=${(s.debt_score ?? 0).toFixed(3)}`,
+    `士气=${(s.morale_score ?? 0).toFixed(3)}`,
+    `创新=${(s.innovation_score ?? 0).toFixed(3)}`,
+    `新增债占比=${(s.creating_debt_score ?? 0).toFixed(3)}`,
+  ]
+  const formula = 'S = 积压×25% + 偿债×20% + 士气×15% + 创新×20% + 新增技术债任务占比×10% + 代码健康×10%'
+  return `${formula} | 当前: ${parts.join(' ')} → S=${(s.score ?? 0).toFixed(3)}`
 })
 
 // 贡献者占比
@@ -424,8 +500,16 @@ function debtLevelLabel(level) {
 .health-breakdown { margin-top: 16px; }
 .breakdown-item {
   display: flex; align-items: center; gap: 8px;
-  margin-bottom: 8px; font-size: 0.8rem;
+  margin-bottom: 8px; font-size: 0.8rem; position: relative; cursor: help;
 }
+.breakdown-tooltip {
+  position: absolute; left: 0; bottom: 100%; margin-bottom: 6px; padding: 8px 10px;
+  font-size: 0.7rem; line-height: 1.4; color: #e6e6e6; background: rgba(20,22,30,0.98);
+  border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s; z-index: 100;
+  pointer-events: none; max-width: 280px; text-align: left;
+}
+.breakdown-item:hover .breakdown-tooltip { opacity: 1; visibility: visible; }
 .breakdown-label { width: 70px; color: var(--text-muted); flex-shrink: 0; }
 .breakdown-bar-wrapper {
   flex: 1; height: 6px; background: rgba(255,255,255,0.06);
@@ -439,8 +523,20 @@ function debtLevelLabel(level) {
 .state-name { font-size: 1.5rem; font-weight: 700; }
 .state-score { color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; }
 .state-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
-.dim-item { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 6px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; }
-.dim-label { color: var(--text-muted); }
+.dim-item { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; font-size: 0.8rem; padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; position: relative; cursor: help; }
+.dim-label { color: var(--text-muted); flex: 1; min-width: 0; line-height: 1.3; }
+.dim-range { font-size: 0.7rem; color: var(--text-muted); opacity: 0.9; font-weight: normal; display: block; margin-top: 2px; }
+.dim-tooltip {
+  position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 6px; padding: 8px 10px;
+  font-size: 0.7rem; line-height: 1.4; color: #e6e6e6; background: rgba(20,22,30,0.98);
+  border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s; z-index: 100;
+  pointer-events: none; max-width: 320px; text-align: left;
+}
+.dim-item:hover .dim-tooltip { opacity: 1; visibility: visible; }
+.state-calc-note { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 12px; padding: 8px 10px; background: rgba(255,255,255,0.02); border-radius: 6px; }
+.state-ranges { font-weight: 600; margin-bottom: 4px; }
+.state-explanation { line-height: 1.4; word-break: break-word; }
 .positive { color: var(--accent-green); }
 .negative { color: var(--accent-red); }
 .neutral { color: var(--accent-blue); }
@@ -472,7 +568,8 @@ function debtLevelLabel(level) {
   background: var(--accent-orange); opacity: 0.5;
 }
 .debt-threshold.danger { background: var(--accent-red); }
-.debt-stats { display: flex; justify-content: space-around; font-size: 0.8rem; color: var(--text-muted); }
+.debt-stats { display: flex; justify-content: space-around; font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; }
+.debt-calc-note { font-size: 0.75rem; color: var(--text-muted); margin-top: 12px; line-height: 1.4; text-align: left; }
 
 /* 英雄检测 */
 .hero-display { }

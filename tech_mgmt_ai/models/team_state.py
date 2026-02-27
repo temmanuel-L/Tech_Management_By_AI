@@ -85,6 +85,18 @@ class TeamStateInput:
     reviews_given: int = 0
     # 当前团队人数
     team_size: int = 1
+    # LLM 代码质量评分 (1-10)，用于代码健康度维度
+    llm_quality_score: float | None = None
+    # LLM 判定为引入技术债的 MR/Commit 数量
+    llm_creating_debt_count: int = 0
+    # LLM 判定为偿还技术债的 MR/Commit 数量
+    llm_paying_debt_count: int = 0
+    # LLM 审查总数 (MR + Commit 抽样)
+    llm_total_reviews: int = 0
+    # 本周期已合并的 MR 数 (无 Issues 时用作积压/交付代理)
+    mr_merged_count: int = 0
+    # 本周期总 MR 数
+    total_mr_count: int = 0
 
 
 @dataclass
@@ -100,7 +112,24 @@ class TeamStateResult:
     debt_score: float            # 技术债维度得分
     morale_score: float          # 士气代理维度得分
     innovation_score: float      # 创新占比维度得分
+    code_health_score: float    # 代码健康度维度得分 (基于 LLM)
     description: str             # 可读的状态描述
+    creating_debt_score: float = 0.0  # 新增技术债维度 (取负, 越高越不利)
+    calc_explanation: str = ""   # 得分计算逻辑说明
+    score_ranges: str = ""       # 各状态对应的得分区间
+    llm_enhanced: bool = False # 是否使用了 LLM 增强
+
+
+def _debt_ratio_to_score(ratio: float) -> float:
+    """
+    偿债占比 → 子指标得分 [-1, 1]
+    峰值在 0.4: f(0.4)=1; f(0)=-0.1; f(1)=-1
+    [0, 0.4] 单调增, (0.4, 1] 单调减
+    """
+    ratio = max(0.0, min(1.0, ratio))
+    if ratio <= 0.4:
+        return -0.1 + 1.1 * (ratio / 0.4) if ratio > 0 else -0.1
+    return 1.0 - 2.0 * (ratio - 0.4) / 0.6
 
 
 def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
@@ -120,37 +149,77 @@ def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
     Returns:
         TeamStateResult: 包含状态、分数和各维度明细的诊断结果
     """
-    # === 维度 1: 积压趋势 ===
-    # 含义: 团队消化需求的速度是否跟得上流入
-    # 正值 → 积压在减少 (好), 负值 → 积压在增长 (差)
-    net_throughput = data.tasks_closed - data.tasks_created
-    backlog_denom = max(data.total_backlog, 1)  # 避免除零
-    backlog_score = net_throughput / backlog_denom
+    # === 维度 1: 积压趋势 值域约[-1,1] ===
+    # 有 Issues 时: (关闭-新增)/积压; 无 Issues 时 MR 合并率×2-1 映射到 [-1,1]
+    if data.total_backlog > 0:
+        net_throughput = data.tasks_closed - data.tasks_created
+        backlog_denom = max(data.total_backlog, 1)
+        backlog_score = max(-1.0, min(1.0, net_throughput / backlog_denom))
+    elif data.total_mr_count > 0:
+        merge_rate = data.mr_merged_count / max(data.total_mr_count, 1)
+        backlog_score = 2.0 * merge_rate - 1.0  # [0,1] → [-1,1]
+    else:
+        backlog_score = 0.0
 
-    # === 维度 2: 技术债占比 ===
-    # 含义: 修复/偿债类任务占总量的比例, 取负值表示越高越不利
+    # === 维度 2: 偿债占比 非线性 [0,1]→[-1,1], 峰值 0.4 ===
+    # 0.4 最优(1), 0 或 1 较差; [0,0.4] 单调增, (0.4,1] 单调减
     total = max(data.total_tasks, 1)
-    debt_score = -(data.debt_tasks / total)
+    if data.llm_total_reviews > 0:
+        pay_ratio = data.llm_paying_debt_count / data.llm_total_reviews
+    else:
+        pay_ratio = data.debt_tasks / total  # Issues 债务任务占比, 同曲线
+    debt_score = _debt_ratio_to_score(pay_ratio)
 
-    # === 维度 3: 士气代理 (Code Review 参与度) ===
-    # 含义: 人均 Review 评论数, 越高表示团队协作越活跃
-    # 书 2.15节: 建立学习共同体, 让新老成员相互学习
+    # === 维度 3: 士气 值域[-1,1] (2×归一化-1) ===
     team = max(data.team_size, 1)
-    morale_score = data.reviews_given / team
-    # 归一化到 [-1, 1] 区间, 假设人均 5 条Review为满分
-    morale_score = min(morale_score / 5.0, 1.0)
+    raw_morale = min(data.reviews_given / team / 5.0, 1.0)
+    morale_score = 2.0 * raw_morale - 1.0
 
-    # === 维度 4: 创新占比 ===
-    # 含义: Feature 类任务占总量的比例
-    innovation_score = data.feature_tasks / total
+    # === 维度 4: 创新占比 值域[-1,1] (2×占比-1) ===
+    if data.llm_total_reviews > 0:
+        neutral_or_feature = data.llm_total_reviews - data.llm_paying_debt_count - data.llm_creating_debt_count
+        raw_innovation = max(0, neutral_or_feature) / data.llm_total_reviews
+    else:
+        raw_innovation = data.feature_tasks / total
+    innovation_score = 2.0 * raw_innovation - 1.0
 
-    # === 加权综合得分 ===
+    # === 维度 5: 新增技术债任务占比 值域[-1,0] 保持 ===
+    if data.llm_total_reviews > 0:
+        creating_debt_score = -(data.llm_creating_debt_count / data.llm_total_reviews)
+    else:
+        creating_debt_score = 0.0
+
+    # === 维度 6: 代码健康度 值域[-1,1] (2×归一化-1, 无LLM时0) ===
+    if data.llm_quality_score is not None:
+        raw_code = (data.llm_quality_score - 1) / 9.0
+        code_health_score = 2.0 * raw_code - 1.0
+    else:
+        code_health_score = 0.0  # 中性
+
+    # === 加权综合得分 (权重和=1, 各子指标值域见注释, S 约在 [-1,1]) ===
     score = (
         settings.TEAM_STATE_W_BACKLOG * backlog_score
         + settings.TEAM_STATE_W_DEBT * debt_score
         + settings.TEAM_STATE_W_MORALE * morale_score
         + settings.TEAM_STATE_W_INNOVATION * innovation_score
+        + settings.TEAM_STATE_W_CREATING_DEBT * creating_debt_score
     )
+    score += settings.TEAM_STATE_W_CODE_HEALTH * code_health_score
+
+    # === 计算逻辑说明与得分区间 ===
+    score_ranges = (
+        "得分区间: 落后 S<-0.3 | 停滞 -0.3≤S<0 | 偿债 0≤S<0.3 | 创新 S≥0.3"
+    )
+    parts = [
+        f"积压趋势×{settings.TEAM_STATE_W_BACKLOG:.0%}",
+        f"偿债占比×{settings.TEAM_STATE_W_DEBT:.0%}",
+        f"士气×{settings.TEAM_STATE_W_MORALE:.0%}",
+        f"创新占比×{settings.TEAM_STATE_W_INNOVATION:.0%}",
+        f"新增技术债任务占比×{settings.TEAM_STATE_W_CREATING_DEBT:.0%}",
+        f"代码健康×{settings.TEAM_STATE_W_CODE_HEALTH:.0%}",
+    ]
+    calc_explanation = f"S = {' + '.join(parts)} | 当前: 积压={backlog_score:.3f} 偿债={debt_score:.3f} 士气={morale_score:.3f} 创新={innovation_score:.3f} 新增债占比={creating_debt_score:.3f} 代码健康={code_health_score:.3f}"
+    calc_explanation += f" → S={score:.3f}"
 
     # === 状态判定 ===
     if score < settings.TEAM_STATE_THRESHOLD_FALLING_BEHIND:
@@ -188,5 +257,10 @@ def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
         debt_score=debt_score,
         morale_score=morale_score,
         innovation_score=innovation_score,
+        code_health_score=code_health_score,
+        creating_debt_score=creating_debt_score,
         description=description,
+        calc_explanation=calc_explanation,
+        score_ranges=score_ranges,
+        llm_enhanced=data.llm_quality_score is not None or data.llm_total_reviews > 0,
     )

@@ -24,6 +24,12 @@ class TechDebtResponse(BaseModel):
     stock: float = 0.0
     fix_commit_count: int = 0
     total_commit_count: int = 0
+    llm_enhanced: bool = False
+    llm_paying_debt_count: int = 0
+    llm_creating_debt_count: int = 0
+    llm_reviewed_mr_count: int = 0
+    llm_reviewed_commit_count: int = 0
+    interest_rate_calc_note: str = ""
 
 
 class HeroResponse(BaseModel):
@@ -42,17 +48,33 @@ class TeamStateResponse(BaseModel):
     debt_score: float = 0.0
     morale_score: float = 0.0
     innovation_score: float = 0.0
+    code_health_score: float = 0.5
+    creating_debt_score: float = 0.0
     description: str = ""
+    calc_explanation: str = ""
+    score_ranges: str = ""
+    llm_enhanced: bool = False
 
 
 class HealthScoreResponse(BaseModel):
     """综合健康分"""
     score: float = 0.0
     level: str = "unknown"
+    # 维度原始得分 (0-100, 不含权重)
+    dora_score: float = 0.0
+    debt_score: float = 0.0
+    hero_score: float = 0.0
+    state_score: float = 0.0
+    # 维度贡献分 (已乘以权重)
     dora_contribution: float = 0.0
     debt_contribution: float = 0.0
     hero_contribution: float = 0.0
     state_contribution: float = 0.0
+    # 各维度权重 (0-1)
+    w_dora: float = 0.0
+    w_debt: float = 0.0
+    w_hero: float = 0.0
+    w_state: float = 0.0
 
 
 class AnalyzeResponse(BaseModel):

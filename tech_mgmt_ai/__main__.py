@@ -173,17 +173,33 @@ def _generate_mock_data(since, until):
             files_changed=3,
         ))
 
+    # 模拟 diff 片段 (长度 >100 以便触发 LLM 审查)
+    _fake_diff = (
+        "diff --git a/src/module.py b/src/module.py\n"
+        "--- a/src/module.py\n+++ b/src/module.py\n"
+        "@@ -1,5 +1,8 @@\n def handler():\n     pass\n+# 新增逻辑\n+    result = process()\n+    return result\n"
+    )
     merge_requests = []
     for i in range(25):
         merged = i % 4 != 0  # 75% 已合并
         created = since + timedelta(days=i)
+        # 部分 MR 标题模拟偿债/引入债/新功能, 便于 LLM 判定
+        if i % 5 == 0:
+            title = f"MR #{i+1}: fix 修复 #{(i//5)+1}"
+        elif i % 5 == 1:
+            title = f"MR #{i+1}: refactor 重构"
+        elif i % 5 == 2:
+            title = f"MR #{i+1}: 临时方案 绕过校验"  # 可能被 LLM 判为引入技术债
+        else:
+            title = f"MR #{i+1}: 功能实现"
         merge_requests.append(MergeRequestInfo(
             id=i + 1,
-            title=f"MR #{i+1}: 功能实现",
+            title=title,
             author=authors[i % len(authors)],
             state="merged" if merged else "opened",
             created_at=created,
             merged_at=created + timedelta(hours=36) if merged else None,
+            diff=_fake_diff,  # 供 LLM 审查使用
             reviewers=[authors[(i+1) % len(authors)]],
             comments_count=2 + i % 3,
         ))

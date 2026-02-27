@@ -60,6 +60,9 @@ class TechDebtResult:
         debt_stock: 技术债存量 (累积值, 正值表示净债务)
         top_debt_contributors: 修复类 Commit 最多的作者 (用于辅助管理决策)
         description: 可读的分析描述
+        llm_enhanced: 是否使用了 LLM 增强分析
+        llm_paying_debt_count: LLM 判定为偿还技术债的 MR 数量
+        llm_creating_debt_count: LLM 判定为引入技术债的 MR 数量
     """
     interest_rate: float = 0.0
     level: str = "healthy"
@@ -70,6 +73,22 @@ class TechDebtResult:
     debt_stock: float = 0.0
     top_debt_contributors: list[tuple[str, int]] = field(default_factory=list)
     description: str = ""
+    llm_enhanced: bool = False
+    llm_paying_debt_count: int = 0
+    llm_creating_debt_count: int = 0
+    llm_reviewed_mr_count: int = 0
+    llm_reviewed_commit_count: int = 0
+    interest_rate_calc_note: str = ""
+
+
+@dataclass
+class LLMCodeReviewResult:
+    """LLM 代码审查结果的简化结构"""
+    mr_id: int
+    quality_score: int = 5
+    is_paying_debt: bool = False
+    is_creating_debt: bool = False
+    summary: str = ""
 
 
 def is_fix_commit(commit: CommitInfo) -> bool:
@@ -100,6 +119,7 @@ def is_fix_commit(commit: CommitInfo) -> bool:
 def calculate_tech_debt(
     commits: list[CommitInfo],
     previous_stock: float = 0.0,
+    llm_reviews: list["LLMCodeReviewResult"] | None = None,
 ) -> TechDebtResult:
     """
     计算技术债利息率和存量
@@ -119,6 +139,7 @@ def calculate_tech_debt(
     Args:
         commits: 本周期的代码提交列表
         previous_stock: 上一周期的技术债存量 (首次运行传 0)
+        llm_reviews: LLM 代码审查结果列表 (可选, 用于增强分析)
 
     Returns:
         TechDebtResult: 包含利息率、存量和详细分析的结果
@@ -153,6 +174,64 @@ def calculate_tech_debt(
         logger.info(
             f"技术债: GitLab 未返回 commit stats, 使用 commit 数量比例兜底 "
             f"(fix={fix_count}, total={len(commits)}, rate={interest_rate:.3f})"
+        )
+
+    # 记录仅基于关键字/行数计算得到的利息率, 便于与 LLM 增强后的结果对比
+    keyword_interest_rate = interest_rate
+
+    # === LLM 增强分析 ===
+    llm_paying_count = 0
+    llm_creating_count = 0
+    llm_mr_count = 0
+    llm_commit_count = 0
+    calc_note = ""
+    if llm_reviews:
+        llm_mr_count = sum(1 for r in llm_reviews if r.mr_id > 0)
+        llm_commit_count = sum(1 for r in llm_reviews if r.mr_id == 0)
+        llm_paying_count = sum(1 for r in llm_reviews if r.is_paying_debt)
+        llm_creating_count = sum(1 for r in llm_reviews if r.is_creating_debt)
+
+        # 如果有 LLM 分析结果，将 LLM 判断的 "偿还/引入技术债" 纳入考量
+        # 语义分析比关键词匹配更准确, 所以在一定权重下优先修正 keyword_interest_rate
+        llm_total = len(llm_reviews)
+        if llm_total > 0:
+            # LLM 认为本周期“主要在偿还技术债”的 MR 占比
+            llm_pay_rate = llm_paying_count / llm_total
+            # LLM 认为“主要在引入新技术债”的 MR 占比
+            llm_create_rate = llm_creating_count / llm_total
+
+            # 解释:
+            #   技术债利息率 I 表示 "当前有多少精力在偿还过往技术债"。
+            #   因此 is_paying_debt=True 越多, 说明越多产能在还利息, I 应该越高 (越不健康)。
+            #
+            #   这里仅用 llm_pay_rate 来修正 keyword_interest_rate, 认为:
+            #     - 关键词匹配给出一个保守下限
+            #     - LLM 通过 MR 审查给出一个更接近真实的上限
+            #
+            #   综合公式:
+            #       I_combined = (1 - w) * I_keyword + w * I_llm
+            #   其中 w 由 TECH_DEBT_LLM_WEIGHT 控制。
+            llm_weight = settings.TECH_DEBT_LLM_WEIGHT
+            llm_interest = llm_pay_rate
+            interest_rate = (1 - llm_weight) * keyword_interest_rate + llm_weight * llm_interest
+
+            w_pct = int(settings.TECH_DEBT_LLM_WEIGHT * 100)
+            calc_note = (
+                f"LLM 抽样: {llm_mr_count} 个 MR + {llm_commit_count} 个 Commit。"
+                f"偿债判定 {llm_paying_count}/{llm_total}，"
+                f"利息率 = (1-{w_pct}%)×关键词率 + {w_pct}%×偿债占比 = {interest_rate:.1%}"
+            )
+            logger.info(
+                "技术债: LLM 增强分析 "
+                f"(keyword_rate={keyword_interest_rate:.3f}, "
+                f"llm_interest={llm_interest:.3f}, "
+                f"llm_pay_rate={llm_pay_rate:.3f}, llm_create_rate={llm_create_rate:.3f}, "
+                f"combined_rate={interest_rate:.3f})"
+            )
+    else:
+        calc_note = (
+            f"全量关键词匹配: 涉及偿还技术债的提交 {fix_count}/{len(commits)} 个，"
+            f"利息率 = 涉及偿还技术债的变更量/总变更量 = {interest_rate:.1%}"
         )
 
     # === 债务等级判定 ===
@@ -208,6 +287,12 @@ def calculate_tech_debt(
         debt_stock=debt_stock,
         top_debt_contributors=top_contributors,
         description=desc,
+        llm_enhanced=bool(llm_reviews),
+        llm_paying_debt_count=llm_paying_count,
+        llm_creating_debt_count=llm_creating_count,
+        llm_reviewed_mr_count=llm_mr_count,
+        llm_reviewed_commit_count=llm_commit_count,
+        interest_rate_calc_note=calc_note,
     )
 
     logger.info(
