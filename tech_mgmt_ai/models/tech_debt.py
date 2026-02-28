@@ -83,11 +83,21 @@ class TechDebtResult:
 
 @dataclass
 class LLMCodeReviewResult:
-    """LLM 代码审查结果的简化结构"""
-    mr_id: int
+    """LLM 代码审查结果的简化结构（用于数据下钻展示）"""
+    mr_id: int  # MR id (MR 审查时 > 0) 或 0 (Commit 审查时)
+    sha: str = ""  # Commit SHA (Commit 审查时)
+    author: str = ""  # 作者（GitLab 用户名，可用 GITLAB_AUTHOR_ALIASES 映射为显示名）
+    diff: str = ""  # 代码 diff 内容
+    message: str = ""  # Commit message 或 MR title
     quality_score: int = 5
     is_paying_debt: bool = False
+    is_paying_debt_reason: str = ""
     is_creating_debt: bool = False
+    is_creating_debt_reason: str = ""
+    is_creating_debt_code_block: str = ""
+    is_creating_debt_correct_action: str = ""
+    is_adding_new_function: bool = False
+    is_adding_new_function_reason: str = ""
     summary: str = ""
 
 
@@ -219,7 +229,7 @@ def calculate_tech_debt(
             calc_note = (
                 f"LLM 抽样: {llm_mr_count} 个 MR + {llm_commit_count} 个 Commit。"
                 f"偿债判定 {llm_paying_count}/{llm_total}，"
-                f"利息率 = (1-{w_pct}%)×关键词率 + {w_pct}%×偿债占比 = {interest_rate:.1%}"
+                f"利息率 = (1-{w_pct}%)×关键字审查偿债率 + {w_pct}%×LLM审查偿债率 = {interest_rate:.1%}"
             )
             logger.info(
                 "技术债: LLM 增强分析 "

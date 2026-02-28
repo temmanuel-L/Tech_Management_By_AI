@@ -27,7 +27,7 @@
                      新功能占比越高, 说明团队越接近创新状态
 
 权重默认值 (可通过 settings 调整):
-  w_backlog=0.30, w_debt=0.25, w_morale=0.20, w_innovation=0.25
+  w_backlog=0.20, w_debt=0.20, w_morale=0.20, w_innovation=0.20, w_creating_debt=0.20
 
 状态判定阈值:
   S < -0.3           → Falling Behind
@@ -93,6 +93,8 @@ class TeamStateInput:
     llm_paying_debt_count: int = 0
     # LLM 审查总数 (MR + Commit 抽样)
     llm_total_reviews: int = 0
+    # LLM 判定为新增业务功能的 MR/Commit 数量（用于创新占比维度）
+    llm_adding_new_function_count: int = 0
     # 本周期已合并的 MR 数 (无 Issues 时用作积压/交付代理)
     mr_merged_count: int = 0
     # 本周期总 MR 数
@@ -112,7 +114,6 @@ class TeamStateResult:
     debt_score: float            # 技术债维度得分
     morale_score: float          # 士气代理维度得分
     innovation_score: float      # 创新占比维度得分
-    code_health_score: float    # 代码健康度维度得分 (基于 LLM)
     description: str             # 可读的状态描述
     creating_debt_score: float = 0.0  # 新增技术债维度 (取负, 越高越不利)
     calc_explanation: str = ""   # 得分计算逻辑说明
@@ -130,6 +131,24 @@ def _debt_ratio_to_score(ratio: float) -> float:
     if ratio <= 0.4:
         return -0.1 + 1.1 * (ratio / 0.4) if ratio > 0 else -0.1
     return 1.0 - 2.0 * (ratio - 0.4) / 0.6
+
+
+def _creating_debt_ratio_to_score(ratio: float) -> float:
+    """
+    新增技术债占比 → 得分 非线性映射到 [-1, 0.5]
+
+    锚点（以 8 抽样为例）: 0→0.5, 1个→0.2, 2个→0, 3个→-0.2, 全部→-1，
+    放大新增债数量的惩罚、使分值随占比快速下降。
+    """
+    r = max(0.0, min(1.0, ratio))
+    if r <= 0.125:  # [0, 1/8]
+        return 0.5 - 2.4 * r
+    if r <= 0.25:   # (1/8, 2/8]
+        return 0.2 - 1.6 * (r - 0.125)
+    if r <= 0.375:  # (2/8, 3/8]
+        return -1.6 * (r - 0.25)
+    # (3/8, 1]: -0.2 线性到 -1
+    return -0.2 - 0.8 * (r - 0.375) / 0.625
 
 
 def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
@@ -150,14 +169,16 @@ def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
         TeamStateResult: 包含状态、分数和各维度明细的诊断结果
     """
     # === 维度 1: 积压趋势 值域约[-1,1] ===
-    # 有 Issues 时: (关闭-新增)/积压; 无 Issues 时 MR 合并率×2-1 映射到 [-1,1]
+    # 有 Issues 时: (关闭-新增)/积压; 无 Issues 时以 MR 合并率为代理，采用中性化公式避免长期满分
+    # 参考: 合并率 85% 视为中性(0)，100%→约 0.3，50%→约 -0.7，避免“全部合并即满分 1.0”
     if data.total_backlog > 0:
         net_throughput = data.tasks_closed - data.tasks_created
         backlog_denom = max(data.total_backlog, 1)
         backlog_score = max(-1.0, min(1.0, net_throughput / backlog_denom))
     elif data.total_mr_count > 0:
         merge_rate = data.mr_merged_count / max(data.total_mr_count, 1)
-        backlog_score = 2.0 * merge_rate - 1.0  # [0,1] → [-1,1]
+        # 中性基线 0.85: 高于 85% 合并率为正，低于为负，最高约 0.3 而非 1.0
+        backlog_score = max(-1.0, min(1.0, (merge_rate - 0.85) * 2.0))
     else:
         backlog_score = 0.0
 
@@ -175,28 +196,26 @@ def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
     raw_morale = min(data.reviews_given / team / 5.0, 1.0)
     morale_score = 2.0 * raw_morale - 1.0
 
-    # === 维度 4: 创新占比 值域[-1,1] (2×占比-1) ===
+    # === 维度 4: 创新占比 值域[-0.5, 1] 非线性映射 ===
+    # 占比 0→-0.5，约 10–20%→0，100%→1；5/8 等高占比映射到 ≥0.5
     if data.llm_total_reviews > 0:
-        neutral_or_feature = data.llm_total_reviews - data.llm_paying_debt_count - data.llm_creating_debt_count
-        raw_innovation = max(0, neutral_or_feature) / data.llm_total_reviews
+        raw_innovation = data.llm_adding_new_function_count / data.llm_total_reviews
     else:
         raw_innovation = data.feature_tasks / total
-    innovation_score = 2.0 * raw_innovation - 1.0
+    raw_innovation = max(0.0, min(1.0, raw_innovation))
+    if raw_innovation <= 0.15:
+        innovation_score = -0.5 + (0.5 / 0.15) * raw_innovation  # [0, 0.15] → [-0.5, 0]
+    else:
+        innovation_score = (raw_innovation - 0.15) / 0.85  # (0.15, 1] → (0, 1]
 
-    # === 维度 5: 新增技术债任务占比 值域[-1,0] 保持 ===
+    # === 维度 5: 新增技术债任务占比 值域[-1, 0.5] 非线性 (0→0.5, 1/8→0.2, 2/8→0, 3/8→-0.2, 全部→-1) ===
     if data.llm_total_reviews > 0:
-        creating_debt_score = -(data.llm_creating_debt_count / data.llm_total_reviews)
+        raw_creating = data.llm_creating_debt_count / data.llm_total_reviews
+        creating_debt_score = _creating_debt_ratio_to_score(raw_creating)
     else:
         creating_debt_score = 0.0
 
-    # === 维度 6: 代码健康度 值域[-1,1] (2×归一化-1, 无LLM时0) ===
-    if data.llm_quality_score is not None:
-        raw_code = (data.llm_quality_score - 1) / 9.0
-        code_health_score = 2.0 * raw_code - 1.0
-    else:
-        code_health_score = 0.0  # 中性
-
-    # === 加权综合得分 (权重和=1, 各子指标值域见注释, S 约在 [-1,1]) ===
+    # === 加权综合得分 (五维权重和=1, S 约在 [-1,1]) ===
     score = (
         settings.TEAM_STATE_W_BACKLOG * backlog_score
         + settings.TEAM_STATE_W_DEBT * debt_score
@@ -204,7 +223,6 @@ def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
         + settings.TEAM_STATE_W_INNOVATION * innovation_score
         + settings.TEAM_STATE_W_CREATING_DEBT * creating_debt_score
     )
-    score += settings.TEAM_STATE_W_CODE_HEALTH * code_health_score
 
     # === 计算逻辑说明与得分区间 ===
     score_ranges = (
@@ -216,9 +234,8 @@ def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
         f"士气×{settings.TEAM_STATE_W_MORALE:.0%}",
         f"创新占比×{settings.TEAM_STATE_W_INNOVATION:.0%}",
         f"新增技术债任务占比×{settings.TEAM_STATE_W_CREATING_DEBT:.0%}",
-        f"代码健康×{settings.TEAM_STATE_W_CODE_HEALTH:.0%}",
     ]
-    calc_explanation = f"S = {' + '.join(parts)} | 当前: 积压={backlog_score:.3f} 偿债={debt_score:.3f} 士气={morale_score:.3f} 创新={innovation_score:.3f} 新增债占比={creating_debt_score:.3f} 代码健康={code_health_score:.3f}"
+    calc_explanation = f"S = {' + '.join(parts)} | 当前: 积压={backlog_score:.3f} 偿债={debt_score:.3f} 士气={morale_score:.3f} 创新={innovation_score:.3f} 新增债占比={creating_debt_score:.3f}"
     calc_explanation += f" → S={score:.3f}"
 
     # === 状态判定 ===
@@ -257,7 +274,6 @@ def diagnose_team_state(data: TeamStateInput) -> TeamStateResult:
         debt_score=debt_score,
         morale_score=morale_score,
         innovation_score=innovation_score,
-        code_health_score=code_health_score,
         creating_debt_score=creating_debt_score,
         description=description,
         calc_explanation=calc_explanation,

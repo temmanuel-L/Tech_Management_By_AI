@@ -214,10 +214,15 @@ class GitLabConnector(BaseConnector):
                     if r.get("username")
                 ]
 
+                # 作者显示名（与 commit 一致，使用 GITLAB_AUTHOR_ALIASES 映射）
+                raw_mr_author = mr.get("author", {}).get("username", "unknown")
+                alias_map = getattr(settings, "author_alias_map", None) or {}
+                mr_author = alias_map.get(raw_mr_author, raw_mr_author) if alias_map else raw_mr_author
+
                 all_mrs.append(MergeRequestInfo(
                     id=mr.get("id", 0),
                     title=mr.get("title", ""),
-                    author=mr.get("author", {}).get("username", "unknown"),
+                    author=mr_author,
                     state=mr.get("state", ""),
                     created_at=self._parse_datetime(mr.get("created_at")) or datetime.now(),
                     merged_at=self._parse_datetime(mr.get("merged_at")),

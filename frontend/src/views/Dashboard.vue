@@ -71,7 +71,13 @@
           <div class="state-score">得分: {{ data.team_state.score.toFixed(3) }}</div>
         </div>
         <div class="state-dimensions">
-          <div class="dim-item" v-for="dim in stateDimensions" :key="dim.label">
+          <div 
+            class="dim-item" 
+            v-for="dim in stateDimensions" 
+            :key="dim.label"
+            :class="{ clickable: dim.clickable }"
+            @click="handleDimClick(dim)"
+          >
             <span class="dim-label">{{ dim.label }} <span class="dim-range">({{ dim.range }})</span></span>
             <span class="dim-value" :class="dim.cls">{{ dim.value }}</span>
             <div class="dim-tooltip" v-if="dim.tip">{{ dim.tip }}</div>
@@ -120,9 +126,9 @@
             <div class="debt-threshold danger" style="left: 50%"></div>
           </div>
           <div class="debt-stats">
-            <span>涉及偿还技术债的提交数 / 总提交数: {{ data.tech_debt.fix_commit_count }}/{{ data.tech_debt.total_commit_count }}</span>
+            <span>关键字审查偿债率: {{ data.tech_debt.fix_commit_count }} / {{ data.tech_debt.total_commit_count }}</span>
             <span v-if="data.tech_debt.llm_enhanced">
-              LLM 偿债: {{ data.tech_debt.llm_paying_debt_count }}/{{ data.tech_debt.llm_reviewed_mr_count + data.tech_debt.llm_reviewed_commit_count }}
+              LLM 审查偿债率: {{ data.tech_debt.llm_paying_debt_count }}/{{ data.tech_debt.llm_reviewed_mr_count + data.tech_debt.llm_reviewed_commit_count }}
             </span>
           </div>
           <p class="debt-calc-note" v-if="data.tech_debt.interest_rate_calc_note">
@@ -177,10 +183,24 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Chart, registerables } from 'chart.js'
 import { runAnalysis as apiRunAnalysis, getLatest, getHistory as apiGetHistory } from '../api/client.js'
 
 Chart.register(...registerables)
+
+const router = useRouter()
+
+// 点击跳转到数据下钻页面
+const handleDimClick = (dim) => {
+  if (dim.clickable && dim.route) {
+    // 缓存当前数据到 localStorage
+    if (data.value?.llm_reviews) {
+      localStorage.setItem('llm_reviews', JSON.stringify(data.value.llm_reviews))
+    }
+    router.push(dim.route)
+  }
+}
 
 const data = ref(null)
 const loading = ref(false)
@@ -308,7 +328,7 @@ const doraMetrics = computed(() => {
 const STATE_DIM_META = {
   积压趋势: {
     range: '[-1,1] 正值=积压减少 负值=增加',
-    tip: '数据: Issues 的 tasks_closed/tasks_created/total_backlog，或 MR 的 merged_count/total_mr_count。计算: 有 Issues 时 (关闭-新增)/积压 截断至[-1,1]；无 Issues 时 2×MR合并率-1 映射到[-1,1]。',
+    tip: '数据: Issues 的 tasks_closed/tasks_created/total_backlog，或 MR 的 merged_count/total_mr_count。计算: 有 Issues 时 (关闭-新增)/积压 截断至[-1,1]；无 Issues 时以 MR 合并率为代理，(合并率-0.85)×2 截断至[-1,1]，85% 合并率视为中性(0)，避免长期满分。',
   },
   偿债占比: {
     range: '[-1,1] 0.4 最优，过高或过低均降分',
@@ -319,30 +339,39 @@ const STATE_DIM_META = {
     tip: '数据: MR 的 comments_count、team_size。计算: 2×(reviews/team/5)-1 映射到[-1,1]。',
   },
   创新占比: {
-    range: '[-1,1] 越高越好 (0=中性)',
-    tip: '数据: LLM 或 Issues。计算: 2×创新占比-1 映射到[-1,1]，-1=无创新 1=全创新。',
+    range: '[-0.5,1] 越高越好（约10–20%映射到0，100%→1）',
+    tip: '数据: LLM 或 Issues。计算: 非线性映射，占比 0→-0.5、约15%→0、100%→1，权重 20%。',
   },
   新增技术债任务占比: {
-    range: '[-1,0] 越近0越好',
-    tip: '数据: LLM 审查的 is_creating_debt 判定。计算: -(llm_creating_debt_count/llm_total_reviews)，取负影响，权重 10%。',
+    range: '[-1, 0.5] 无新增=0.5，全部新增=-1（非线性）',
+    tip: '数据: LLM 审查的 is_creating_debt 判定。计算: 非线性映射，0→0.5、约1/8→0.2、2/8→0、3/8→-0.2、全部新增→-1，放大新增债惩罚，权重 20%。',
   },
+}
+// 团队状态子指标颜色：>=0.3 绿，0<=得分<0.3 黄，<0 红
+function stateDimCls(score) {
+  const v = score ?? 0
+  if (v >= 0.3) return 'positive'
+  if (v >= 0) return 'neutral'
+  return 'negative'
 }
 // 团队状态维度 (新增技术债任务占比 有 LLM 时常显)
 const stateDimensions = computed(() => {
   if (!data.value) return []
   const s = data.value.team_state
   const dims = [
-    { label: '积压趋势', ...STATE_DIM_META.积压趋势, value: s.backlog_score?.toFixed(3) ?? '-', cls: (s.backlog_score ?? 0) >= 0 ? 'positive' : 'negative' },
-    { label: '偿债占比', ...STATE_DIM_META.偿债占比, value: s.debt_score?.toFixed(3) ?? '-', cls: (s.debt_score ?? 0) >= 0 ? 'positive' : 'negative' },
-    { label: '士气', ...STATE_DIM_META.士气, value: s.morale_score?.toFixed(3) ?? '-', cls: (s.morale_score ?? 0) >= 0 ? 'positive' : 'negative' },
-    { label: '创新占比', ...STATE_DIM_META.创新占比, value: s.innovation_score?.toFixed(3) ?? '-', cls: 'positive' },
+    { label: '积压趋势', ...STATE_DIM_META.积压趋势, value: s.backlog_score?.toFixed(3) ?? '-', cls: stateDimCls(s.backlog_score), clickable: false },
+    { label: '偿债占比', ...STATE_DIM_META.偿债占比, value: s.debt_score?.toFixed(3) ?? '-', cls: stateDimCls(s.debt_score), clickable: true, route: '/drilldown/paying_debt' },
+    { label: '士气', ...STATE_DIM_META.士气, value: s.morale_score?.toFixed(3) ?? '-', cls: stateDimCls(s.morale_score), clickable: false },
+    { label: '创新占比', ...STATE_DIM_META.创新占比, value: s.innovation_score?.toFixed(3) ?? '-', cls: stateDimCls(s.innovation_score), clickable: true, route: '/drilldown/innovation' },
   ]
-  // 始终显示新增技术债任务占比 (无 LLM 时为 0)
+  // 始终显示新增技术债任务占比 (无 LLM 时为 0)，值域 [-1, 0.5]
   dims.push({
     label: '新增技术债任务占比',
     ...STATE_DIM_META.新增技术债任务占比,
     value: (s.creating_debt_score ?? 0).toFixed(3),
-    cls: 'negative',
+    cls: stateDimCls(s.creating_debt_score),
+    clickable: true,
+    route: '/drilldown/creating_debt',
   })
   return dims
 })
@@ -364,7 +393,7 @@ const stateCalcExplanation = computed(() => {
     `创新=${(s.innovation_score ?? 0).toFixed(3)}`,
     `新增债占比=${(s.creating_debt_score ?? 0).toFixed(3)}`,
   ]
-  const formula = 'S = 积压×25% + 偿债×20% + 士气×15% + 创新×20% + 新增技术债任务占比×10% + 代码健康×10%'
+  const formula = 'S = 积压趋势×20% + 偿债占比×20% + 士气×20% + 创新占比×20% + 新增技术债任务占比×20%'
   return `${formula} | 当前: ${parts.join(' ')} → S=${(s.score ?? 0).toFixed(3)}`
 })
 
@@ -524,6 +553,8 @@ function debtLevelLabel(level) {
 .state-score { color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; }
 .state-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
 .dim-item { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; font-size: 0.8rem; padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; position: relative; cursor: help; }
+.dim-item.clickable { cursor: pointer; }
+.dim-item.clickable:hover { background: rgba(255,255,255,0.06); }
 .dim-label { color: var(--text-muted); flex: 1; min-width: 0; line-height: 1.3; }
 .dim-range { font-size: 0.7rem; color: var(--text-muted); opacity: 0.9; font-weight: normal; display: block; margin-top: 2px; }
 .dim-tooltip {
@@ -539,7 +570,7 @@ function debtLevelLabel(level) {
 .state-explanation { line-height: 1.4; word-break: break-word; }
 .positive { color: var(--accent-green); }
 .negative { color: var(--accent-red); }
-.neutral { color: var(--accent-blue); }
+.neutral { color: #e6a23c; } /* 0<=得分<0.3 黄色 */
 .state-desc { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
 
 /* DORA */

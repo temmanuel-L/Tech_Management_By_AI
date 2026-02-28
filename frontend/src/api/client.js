@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const api = axios.create({
     baseURL: '/api',
-    timeout: 30000,
+    timeout: 60000,
 })
 
 /**
@@ -27,6 +27,12 @@ export async function getLatest() {
 /** 获取历史数据 */
 export async function getHistory(days = 90) {
     const { data } = await api.get(`/metrics/history?days=${days}`)
+    return data
+}
+
+/** 获取团队状态数据下钻（抽样说明、样本列表、过滤结果） */
+export async function getDrilldown(drillType) {
+    const { data } = await api.get(`/team-state/drilldown/${drillType}`)
     return data
 }
 

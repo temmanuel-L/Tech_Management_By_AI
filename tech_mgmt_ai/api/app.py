@@ -7,6 +7,7 @@ FastAPI 主应用
 
 import asyncio
 import logging
+import random
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -15,10 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from tech_mgmt_ai.api.schemas import (
     AnalyzeResponse,
+    CommitReviewItem,
+    DrillDownResponse,
     DORAMetricsResponse,
     HealthScoreResponse,
     HeroResponse,
     HistoryPointResponse,
+    SampleInfo,
     TeamSizingRequest,
     TeamSizingIssueResponse,
     TeamSizingResponse,
@@ -77,6 +81,105 @@ app.add_middleware(
 def health_check():
     """服务健康检查"""
     return {"status": "ok", "service": "tech_mgmt_ai", "version": "0.1.0"}
+
+
+@app.get("/api/team-state/drilldown/{drill_type}", response_model=DrillDownResponse)
+async def get_team_state_drilldown(drill_type: str):
+    """
+    团队状态数据下钻接口
+
+    drill_type: 下钻类型
+        - "paying_debt": 偿还技术债的 commit
+        - "creating_debt": 新增技术债的 commit
+        - "innovation": 新增业务功能的 commit
+
+    从最近一次分析的快照中加载 llm_reviews 数据
+    """
+    # 获取最近一次分析结果
+    snap = get_latest_snapshot()
+    if not snap:
+        return DrillDownResponse(
+            sample_info=SampleInfo(
+                sample_method="暂无分析数据，请先运行分析",
+                sample_count=0,
+                total_count=0,
+                source="none",
+            ),
+            all_samples=[],
+            filtered_items=[],
+        )
+
+    details = snap.details_json or {}
+    all_reviews = details.get("llm_reviews", [])
+
+    if not all_reviews:
+        return DrillDownResponse(
+            sample_info=SampleInfo(
+                sample_method="最近一次分析未启用 LLM 审查，无审查详情",
+                sample_count=0,
+                total_count=0,
+                source="none",
+            ),
+            all_samples=[],
+            filtered_items=[],
+        )
+
+    # 转换为 CommitReviewItem
+    all_items = [
+        CommitReviewItem(
+            mr_id=r.get("mr_id", 0),
+            sha=r.get("sha", ""),
+            author=r.get("author", ""),
+            message=r.get("message", ""),
+            diff=r.get("diff", ""),
+            quality_score=r.get("quality_score", 5),
+            is_paying_debt=r.get("is_paying_debt", False),
+            is_paying_debt_reason=r.get("is_paying_debt_reason", ""),
+            is_creating_debt=r.get("is_creating_debt", False),
+            is_creating_debt_reason=r.get("is_creating_debt_reason", ""),
+            is_creating_debt_code_block=r.get("is_creating_debt_code_block", ""),
+            is_creating_debt_correct_action=r.get("is_creating_debt_correct_action", ""),
+            is_adding_new_function=r.get("is_adding_new_function", False),
+            is_adding_new_function_reason=r.get("is_adding_new_function_reason", ""),
+            summary=r.get("summary", ""),
+        )
+        for r in all_reviews
+    ]
+
+    # 根据类型过滤
+    if drill_type == "paying_debt":
+        filtered = [r for r in all_items if r.is_paying_debt]
+    elif drill_type == "creating_debt":
+        filtered = [r for r in all_items if r.is_creating_debt]
+    elif drill_type == "innovation":
+        filtered = [r for r in all_items if r.is_adding_new_function]
+    else:
+        filtered = []
+
+    # 判断数据来源
+    is_llm = details.get("llm_enhanced", False)
+    source = "llm" if is_llm else "keyword"
+    
+    # 获取抽样配置和总量
+    mr_sample = settings.TECH_DEBT_LLM_MR_SAMPLE_LIMIT
+    commit_sample = settings.TECH_DEBT_LLM_COMMIT_SAMPLE_LIMIT
+    total_commits = snap.total_commits or details.get("total_commits", len(all_reviews))
+    
+    sample_method = (
+        f"LLM 审查抽样：MR 按时间倒序取前 {mr_sample} 个，Commit 50% 按变更量降序取前、50% 在剩余中随机抽取（共 {commit_sample} 个）"
+        if is_llm else "关键字匹配分析"
+    )
+
+    return DrillDownResponse(
+        sample_info=SampleInfo(
+            sample_method=sample_method,
+            sample_count=len(all_reviews),
+            total_count=total_commits,
+            source=source,
+        ),
+        all_samples=all_items,
+        filtered_items=filtered,
+    )
 
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
@@ -143,7 +246,7 @@ async def run_analysis(
                 )
                 tasks_to_run.append(("mr", mr, coro))
 
-        # --- 2) Commit 抽样审查 ---
+        # --- 2) Commit 抽样审查：50% 按变更量降序取前，50% 在剩余中随机抽取 ---
         if commits:
             commits_sorted = sorted(
                 commits,
@@ -152,7 +255,13 @@ async def run_analysis(
             )
             commits_candidates = [c for c in commits_sorted if (c.additions + c.deletions) > 0]
             sample_limit = getattr(settings, "TECH_DEBT_LLM_COMMIT_SAMPLE_LIMIT", 20)
-            sample_commits = commits_candidates[:sample_limit]
+            n = min(sample_limit, len(commits_candidates))
+            n_by_size = n // 2
+            n_random = n - n_by_size
+            by_size = commits_candidates[:n_by_size]
+            remainder = commits_candidates[n_by_size:]
+            random_part = random.sample(remainder, min(n_random, len(remainder))) if remainder else []
+            sample_commits = by_size + random_part
 
             for c in sample_commits:
                 pseudo_diff = (
@@ -186,37 +295,74 @@ async def run_analysis(
 
                 if kind == "mr":
                     logger.info(
-                        "LLM 代码Review 完成 (MR): mr_id=%s, quality=%d, is_paying_debt=%s, is_creating_debt=%s, summary=%s",
+                        "LLM 代码Review 完成 (MR): mr_id=%s, quality=%d, "
+                        "is_paying_debt=%s, paying_debt_reason=%s, "
+                        "is_creating_debt=%s, creating_debt_reason=%s, correct_action=%s, "
+                        "is_adding_new_function=%s, adding_new_function_reason=%s, "
+                        "summary=%s",
                         obj.id,
                         result.quality_score,
                         result.is_paying_debt,
+                        result.is_paying_debt_reason[:50] if result.is_paying_debt_reason else "",
                         result.is_creating_debt,
+                        result.is_creating_debt_reason[:50] if result.is_creating_debt_reason else "",
+                        result.is_creating_debt_correct_action[:50] if result.is_creating_debt_correct_action else "",
+                        result.is_adding_new_function,
+                        result.is_adding_new_function_reason[:50] if result.is_adding_new_function_reason else "",
                         result.summary[:80] if result.summary else "",
                     )
                     llm_reviews.append(LLMCodeReviewResult(
                         mr_id=obj.id,
+                        sha="",
+                        author=getattr(obj, "author", "") or "",
+                        diff=obj.diff,
+                        message=obj.title,
                         quality_score=result.quality_score,
                         is_paying_debt=result.is_paying_debt,
+                        is_paying_debt_reason=result.is_paying_debt_reason,
                         is_creating_debt=result.is_creating_debt,
+                        is_creating_debt_reason=result.is_creating_debt_reason,
+                        is_creating_debt_code_block=getattr(result, "is_creating_debt_code_block", "") or "",
+                        is_creating_debt_correct_action=result.is_creating_debt_correct_action,
+                        is_adding_new_function=result.is_adding_new_function,
+                        is_adding_new_function_reason=result.is_adding_new_function_reason,
                         summary=result.summary,
                     ))
                 else:
                     change_size = obj.additions + obj.deletions
                     logger.info(
                         "LLM 代码Review 完成 (Commit 抽样): sha=%s, size=%d, quality=%d, "
-                        "is_paying_debt=%s, is_creating_debt=%s, summary=%s",
+                        "is_paying_debt=%s, paying_debt_reason=%s, "
+                        "is_creating_debt=%s, creating_debt_reason=%s, correct_action=%s, "
+                        "is_adding_new_function=%s, adding_new_function_reason=%s, "
+                        "summary=%s",
                         obj.sha,
                         change_size,
                         result.quality_score,
                         result.is_paying_debt,
+                        result.is_paying_debt_reason[:50] if result.is_paying_debt_reason else "",
                         result.is_creating_debt,
+                        result.is_creating_debt_reason[:50] if result.is_creating_debt_reason else "",
+                        result.is_creating_debt_correct_action[:50] if result.is_creating_debt_correct_action else "",
+                        result.is_adding_new_function,
+                        result.is_adding_new_function_reason[:50] if result.is_adding_new_function_reason else "",
                         result.summary[:80] if result.summary else "",
                     )
                     llm_reviews.append(LLMCodeReviewResult(
                         mr_id=0,
+                        sha=obj.sha,
+                        author=getattr(obj, "author", "") or "",
+                        diff=getattr(obj, "diff", ""),
+                        message=obj.message,
                         quality_score=result.quality_score,
                         is_paying_debt=result.is_paying_debt,
+                        is_paying_debt_reason=result.is_paying_debt_reason,
                         is_creating_debt=result.is_creating_debt,
+                        is_creating_debt_reason=result.is_creating_debt_reason,
+                        is_creating_debt_code_block=getattr(result, "is_creating_debt_code_block", "") or "",
+                        is_creating_debt_correct_action=result.is_creating_debt_correct_action,
+                        is_adding_new_function=result.is_adding_new_function,
+                        is_adding_new_function_reason=result.is_adding_new_function_reason,
                         summary=result.summary,
                     ))
 
@@ -247,6 +393,7 @@ async def run_analysis(
         llm_creating_debt_count=debt_result.llm_creating_debt_count,
         llm_paying_debt_count=debt_result.llm_paying_debt_count,
         llm_total_reviews=llm_total,
+        llm_adding_new_function_count=sum(1 for r in llm_reviews if r.is_adding_new_function) if llm_reviews else 0,
         mr_merged_count=mr_merged,
         total_mr_count=len(merge_requests),
     )
@@ -312,7 +459,6 @@ async def run_analysis(
             "llm_enhanced": debt_result.llm_enhanced or state_result.llm_enhanced,
             "llm_paying_debt_count": debt_result.llm_paying_debt_count,
             "llm_creating_debt_count": debt_result.llm_creating_debt_count,
-            "code_health_score": state_result.code_health_score,
             # 团队状态可解释性
             "team_state_backlog_score": state_result.backlog_score,
             "team_state_debt_score": state_result.debt_score,
@@ -322,6 +468,27 @@ async def run_analysis(
             "team_state_calc_explanation": state_result.calc_explanation,
             "team_state_score_ranges": state_result.score_ranges,
             "team_state_description": state_result.description,
+            # LLM 审查详情（用于数据下钻）
+            "llm_reviews": [
+                {
+                    "mr_id": r.mr_id,
+                    "sha": r.sha,
+                    "author": getattr(r, "author", "") or "",
+                    "message": r.message,
+                    "diff": r.diff,
+                    "quality_score": r.quality_score,
+                    "is_paying_debt": r.is_paying_debt,
+                    "is_paying_debt_reason": r.is_paying_debt_reason,
+                    "is_creating_debt": r.is_creating_debt,
+                    "is_creating_debt_reason": r.is_creating_debt_reason,
+                    "is_creating_debt_code_block": getattr(r, "is_creating_debt_code_block", "") or "",
+                    "is_creating_debt_correct_action": r.is_creating_debt_correct_action,
+                    "is_adding_new_function": r.is_adding_new_function,
+                    "is_adding_new_function_reason": r.is_adding_new_function_reason,
+                    "summary": r.summary,
+                }
+                for r in llm_reviews
+            ] if llm_reviews else [],
         },
     )
     save_snapshot(snapshot)
@@ -380,7 +547,6 @@ async def run_analysis(
             debt_score=state_result.debt_score,
             morale_score=state_result.morale_score,
             innovation_score=state_result.innovation_score,
-            code_health_score=state_result.code_health_score,
             creating_debt_score=state_result.creating_debt_score,
             description=state_result.description,
             calc_explanation=state_result.calc_explanation,
@@ -389,6 +555,27 @@ async def run_analysis(
         ),
         report_markdown=report,
         created_at=datetime.now().isoformat(),
+        # 返回 LLM 审查结果供前端缓存（用于数据下钻）
+        llm_reviews=[
+            CommitReviewItem(
+                mr_id=r.mr_id,
+                sha=r.sha,
+                author=getattr(r, "author", "") or "",
+                message=r.message,
+                diff=r.diff,
+                quality_score=r.quality_score,
+                is_paying_debt=r.is_paying_debt,
+                is_paying_debt_reason=r.is_paying_debt_reason,
+                is_creating_debt=r.is_creating_debt,
+                is_creating_debt_reason=r.is_creating_debt_reason,
+                is_creating_debt_code_block=getattr(r, "is_creating_debt_code_block", "") or "",
+                is_creating_debt_correct_action=r.is_creating_debt_correct_action,
+                is_adding_new_function=r.is_adding_new_function,
+                is_adding_new_function_reason=r.is_adding_new_function_reason,
+                summary=r.summary,
+            )
+            for r in llm_reviews
+        ] if llm_reviews else [],
     )
 
 
@@ -515,7 +702,6 @@ def _snapshot_to_response(snap: MetricsSnapshot) -> AnalyzeResponse:
             debt_score=details.get("team_state_debt_score", 0),
             morale_score=details.get("team_state_morale_score", 0),
             innovation_score=details.get("team_state_innovation_score", 0),
-            code_health_score=details.get("code_health_score", 0.5),
             creating_debt_score=details.get("team_state_creating_debt_score", 0),
             description=details.get("team_state_description", ""),
             calc_explanation=details.get("team_state_calc_explanation", ""),
@@ -524,4 +710,25 @@ def _snapshot_to_response(snap: MetricsSnapshot) -> AnalyzeResponse:
         ),
         report_markdown=snap.report_markdown or "",
         created_at=snap.created_at.isoformat() if snap.created_at else "",
+        # 从持久化存储中加载 llm_reviews
+        llm_reviews=[
+            CommitReviewItem(
+                mr_id=r.get("mr_id", 0),
+                sha=r.get("sha", ""),
+                author=r.get("author", ""),
+                message=r.get("message", ""),
+                diff=r.get("diff", ""),
+                quality_score=r.get("quality_score", 5),
+                is_paying_debt=r.get("is_paying_debt", False),
+                is_paying_debt_reason=r.get("is_paying_debt_reason", ""),
+                is_creating_debt=r.get("is_creating_debt", False),
+                is_creating_debt_reason=r.get("is_creating_debt_reason", ""),
+                is_creating_debt_code_block=r.get("is_creating_debt_code_block", ""),
+                is_creating_debt_correct_action=r.get("is_creating_debt_correct_action", ""),
+                is_adding_new_function=r.get("is_adding_new_function", False),
+                is_adding_new_function_reason=r.get("is_adding_new_function_reason", ""),
+                summary=r.get("summary", ""),
+            )
+            for r in details.get("llm_reviews", [])
+        ],
     )

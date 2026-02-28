@@ -48,7 +48,6 @@ class TeamStateResponse(BaseModel):
     debt_score: float = 0.0
     morale_score: float = 0.0
     innovation_score: float = 0.0
-    code_health_score: float = 0.5
     creating_debt_score: float = 0.0
     description: str = ""
     calc_explanation: str = ""
@@ -77,6 +76,25 @@ class HealthScoreResponse(BaseModel):
     w_state: float = 0.0
 
 
+class CommitReviewItem(BaseModel):
+    """单条 Commit/MR 审查结果（用于数据下钻）"""
+    mr_id: int = 0
+    sha: str = ""
+    author: str = ""  # 作者（来自 GitLab，可用 GITLAB_AUTHOR_ALIASES 映射）
+    message: str = ""  # Commit message 或 MR title
+    diff: str = ""  # 代码 diff（可能较长）
+    quality_score: int = 5
+    is_paying_debt: bool = False
+    is_paying_debt_reason: str = ""
+    is_creating_debt: bool = False
+    is_creating_debt_reason: str = ""
+    is_creating_debt_code_block: str = ""
+    is_creating_debt_correct_action: str = ""
+    is_adding_new_function: bool = False
+    is_adding_new_function_reason: str = ""
+    summary: str = ""
+
+
 class AnalyzeResponse(BaseModel):
     """完整分析结果"""
     health: HealthScoreResponse
@@ -86,6 +104,8 @@ class AnalyzeResponse(BaseModel):
     team_state: TeamStateResponse
     report_markdown: str = ""
     created_at: str = ""
+    # 用于数据下钻: LLM 审查结果（前端可缓存用于下钻页面）
+    llm_reviews: list[CommitReviewItem] = []
 
 
 class HistoryPointResponse(BaseModel):
@@ -104,6 +124,21 @@ class TeamSizingRequest(BaseModel):
     managers: int
     directors: int = 0
     oncall_pool_size: int = 0
+
+
+class SampleInfo(BaseModel):
+    """抽样信息"""
+    sample_method: str = ""  # 抽样方法说明
+    sample_count: int = 0  # 抽样数量
+    total_count: int = 0  # 总量
+    source: str = ""  # 数据来源: "llm" 或 "keyword"
+
+
+class DrillDownResponse(BaseModel):
+    """团队状态数据下钻结果"""
+    sample_info: SampleInfo
+    all_samples: list[CommitReviewItem]  # 所有被审查的 commit 列表
+    filtered_items: list[CommitReviewItem]  # 符合条件的 commit（如 is_paying_debt=True）
 
 
 class TeamSizingIssueResponse(BaseModel):
