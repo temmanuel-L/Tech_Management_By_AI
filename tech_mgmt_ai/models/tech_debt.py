@@ -86,7 +86,7 @@ class LLMCodeReviewResult:
     """LLM 代码审查结果的简化结构（用于数据下钻展示）"""
     mr_id: int  # MR id (MR 审查时 > 0) 或 0 (Commit 审查时)
     sha: str = ""  # Commit SHA (Commit 审查时)
-    author: str = ""  # 作者（GitLab 用户名，可用 GITLAB_AUTHOR_ALIASES 映射为显示名）
+    author: str = ""  # 作者（GitLab username）
     diff: str = ""  # 代码 diff 内容
     message: str = ""  # Commit message 或 MR title
     quality_score: int = 5

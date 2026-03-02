@@ -137,6 +137,19 @@
         </div>
       </div>
 
+      <!-- 各项目 Commit 统计 -->
+      <div class="card" v-if="projectCommitStats.length > 0">
+        <div class="card-header">
+          <h3>各项目 Commit 统计</h3>
+        </div>
+        <div class="project-commits-list">
+          <div v-for="proj in projectCommitStats" :key="proj.project_id" class="project-commits-item">
+            <span class="project-name">{{ proj.project_name }}</span>
+            <span class="project-count">{{ proj.commit_count }} commits</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 英雄检测 -->
       <div class="card">
         <div class="card-header">
@@ -347,6 +360,13 @@ const STATE_DIM_META = {
     tip: '数据: LLM 审查的 is_creating_debt 判定。计算: 非线性映射，0→0.5、约1/8→0.2、2/8→0、3/8→-0.2、全部新增→-1，放大新增债惩罚，权重 20%。',
   },
 }
+
+// 各项目 Commit 统计
+const projectCommitStats = computed(() => {
+  if (!data.value?.project_commit_counts) return []
+  return data.value.project_commit_counts
+})
+
 // 团队状态子指标颜色：>=0.3 绿，0<=得分<0.3 黄，<0 红
 function stateDimCls(score) {
   const v = score ?? 0
@@ -623,6 +643,29 @@ function debtLevelLabel(level) {
 
 /* 趋势图 */
 .chart-container { height: 300px; position: relative; }
+
+/* 各项目 Commit 统计 */
+.project-commits-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.project-commits-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.project-commits-item .project-name {
+  color: var(--text-primary);
+}
+.project-commits-item .project-count {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
 
 /* 空状态 */
 .empty-state {

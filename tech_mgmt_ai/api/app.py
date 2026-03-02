@@ -179,6 +179,7 @@ async def get_team_state_drilldown(drill_type: str):
         ),
         all_samples=all_items,
         filtered_items=filtered,
+        total_count=len(filtered),
     )
 
 
@@ -204,10 +205,8 @@ async def run_analysis(
     # ---- 数据采集 ----
     if source == "gitlab":
         connector = GitLabConnector()
-        commits = connector.fetch_commits(since=since, until=until)
-        merge_requests = connector.fetch_merge_requests(state="all", since=since, until=until)
-        pipelines = connector.fetch_pipelines(since=since, until=until)
-        tasks = connector.fetch_tasks(since=since, until=until)
+        # 使用异步并行获取，大幅缩短数据采集时间
+        commits, merge_requests, pipelines, tasks = await connector.fetch_all(since=since, until=until)
     else:
         # 使用 CLI 中的 mock 数据生成器
         commits, merge_requests, pipelines, tasks = _generate_mock_data(since, until)
@@ -450,6 +449,8 @@ async def run_analysis(
             "debt_top_contributors": [
                 {"author": a, "count": c} for a, c in debt_result.top_debt_contributors
             ],
+            # 项目 commit 统计
+            "project_commit_counts": _build_project_commit_counts(commits),
             # 技术债相关详情
             "tech_debt_fix_commit_count": debt_result.fix_commit_count,
             "llm_reviewed_mr_count": debt_result.llm_reviewed_mr_count,
@@ -576,7 +577,33 @@ async def run_analysis(
             )
             for r in llm_reviews
         ] if llm_reviews else [],
+        # 各项目 commit 数量统计
+        project_commit_counts=_build_project_commit_counts(commits),
     )
+
+
+def _build_project_commit_counts(commits: list) -> list[dict]:
+    """构建项目 commit 数量统计（倒序）"""
+    from collections import Counter
+    from tech_mgmt_ai.config import settings
+
+    # 统计每个项目的 commit 数量
+    project_counts = Counter(c.project_id for c in commits)
+
+    # 获取项目名称映射
+    name_map = settings.gitlab_project_names_map
+
+    # 构建结果列表
+    result = []
+    for pid, count in project_counts.most_common():
+        name = name_map.get(pid, f"项目 {pid}")
+        result.append({
+            "project_id": pid,
+            "project_name": name,
+            "commit_count": count,
+        })
+
+    return result
 
 
 @app.get("/api/metrics/latest", response_model=AnalyzeResponse | None)
@@ -731,4 +758,6 @@ def _snapshot_to_response(snap: MetricsSnapshot) -> AnalyzeResponse:
             )
             for r in details.get("llm_reviews", [])
         ],
+        # 项目 commit 统计（从 details 中获取，如果没有则为空）
+        project_commit_counts=details.get("project_commit_counts", []),
     )

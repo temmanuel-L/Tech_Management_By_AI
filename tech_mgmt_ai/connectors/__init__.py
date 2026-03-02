@@ -28,6 +28,7 @@ class CommitInfo:
     additions: int = 0             # 新增行数
     deletions: int = 0             # 删除行数
     files_changed: int = 0         # 变更文件数
+    project_id: int = 0            # 项目 ID（用于按项目统计）
 
 
 @dataclass

@@ -9,8 +9,10 @@ GitLab 数据连接器
 API 文档: https://docs.gitlab.com/ee/api/
 """
 
+import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 
 import httpx
 
@@ -53,6 +55,41 @@ class GitLabConnector(BaseConnector):
         self.project_ids = project_ids or settings.gitlab_project_id_list
         self._api_base = f"{self.gitlab_url}/api/v4"
         self._headers = {"PRIVATE-TOKEN": self._token}
+
+    async def _aget(self, client: httpx.AsyncClient, path: str, params: dict | None = None) -> list[dict]:
+        """异步带自动分页的 GitLab API GET 请求"""
+        results: list[dict] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            p = {"page": page, "per_page": per_page}
+            if params:
+                p.update(params)
+
+            try:
+                resp = await client.get(
+                    f"{self._api_base}{path}",
+                    headers=self._headers,
+                    params=p,
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError as e:
+                logger.error(f"GitLab API 请求失败: {path} → {e}")
+                break
+
+            data = resp.json()
+            if not isinstance(data, list):
+                results.append(data)
+                break
+
+            results.extend(data)
+            if len(data) < per_page:
+                break
+            page += 1
+
+        return results
 
     def _get(self, path: str, params: dict | None = None) -> list[dict]:
         """
@@ -134,12 +171,13 @@ class GitLabConnector(BaseConnector):
 
             raw_commits = self._get(f"/projects/{pid}/repository/commits", params)
 
-            alias_map = settings.author_alias_map
             for c in raw_commits:
                 # 获取单个 commit 的详细统计 (行级变更数, 需 with_stats=true)
                 stats = c.get("stats", {})
+                # 使用 normalize_author 规范化作者名称
                 raw_author = c.get("author_name", "unknown")
-                author = alias_map.get(raw_author, raw_author) if alias_map else raw_author
+                raw_email = c.get("author_email", "")
+                author = settings.normalize_author(raw_author, raw_email)
                 all_commits.append(CommitInfo(
                     sha=c.get("id", ""),
                     author=author,
@@ -148,6 +186,7 @@ class GitLabConnector(BaseConnector):
                     additions=stats.get("additions", 0),
                     deletions=stats.get("deletions", 0),
                     files_changed=stats.get("total", 0),
+                    project_id=pid,
                 ))
 
         logger.info(
@@ -214,10 +253,9 @@ class GitLabConnector(BaseConnector):
                     if r.get("username")
                 ]
 
-                # 作者显示名（与 commit 一致，使用 GITLAB_AUTHOR_ALIASES 映射）
-                raw_mr_author = mr.get("author", {}).get("username", "unknown")
-                alias_map = getattr(settings, "author_alias_map", None) or {}
-                mr_author = alias_map.get(raw_mr_author, raw_mr_author) if alias_map else raw_mr_author
+                # 作者规范化
+                raw_author = mr.get("author", {}).get("username", "unknown")
+                mr_author = settings.normalize_author(raw_author)
 
                 all_mrs.append(MergeRequestInfo(
                     id=mr.get("id", 0),
@@ -346,7 +384,264 @@ class GitLabConnector(BaseConnector):
                     description=issue.get("description", ""),
                     status="done" if issue.get("state") == "closed" else "open",
                     task_type=task_type,
-                    assignee=(issue.get("assignee") or {}).get("username", ""),
+                    assignee=settings.normalize_author(
+                        (issue.get("assignee") or {}).get("username", "")
+                    ),
+                    created_at=self._parse_datetime(issue.get("created_at")),
+                    due_date=self._parse_datetime(issue.get("due_date")),
+                    completed_at=self._parse_datetime(issue.get("closed_at")),
+                ))
+
+        logger.info(f"GitLab: 获取 {len(all_tasks)} 条 Issues/Tasks")
+        return all_tasks
+
+    async def fetch_all(
+        self,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> tuple[list[CommitInfo], list[MergeRequestInfo], list[PipelineInfo], list[TaskInfo]]:
+        """
+        并行获取所有 GitLab 数据（Commits、MRs、Pipelines、Tasks）
+
+        使用异步并发请求，大幅缩短数据采集时间。
+        """
+        async with httpx.AsyncClient() as client:
+            # 并行发起所有请求
+            commits_task = self._fetch_all_commits(client, since, until)
+            mrs_task = self._fetch_all_mrs(client, since, until)
+            pipelines_task = self._fetch_all_pipelines(client, since, until)
+            tasks_task = self._fetch_all_tasks(client, since, until)
+
+            commits, merge_requests, pipelines, tasks = await asyncio.gather(
+                commits_task, mrs_task, pipelines_task, tasks_task
+            )
+
+        return commits, merge_requests, pipelines, tasks
+
+    async def _fetch_all_commits(
+        self,
+        client: httpx.AsyncClient,
+        since: datetime | None,
+        until: datetime | None,
+    ) -> list[CommitInfo]:
+        """异步获取所有项目的 Commits"""
+        all_commits: list[CommitInfo] = []
+
+        # 并行获取所有项目的 commits
+        async def fetch_project_commits(pid: int) -> tuple[int, list[dict]]:
+            params: dict = {"with_stats": True}
+            if since:
+                params["since"] = since.isoformat()
+            if until:
+                params["until"] = until.isoformat()
+            commits = await self._aget(client, f"/projects/{pid}/repository/commits", params)
+            return pid, commits
+
+        # 并行获取所有项目的 commits
+        results = await asyncio.gather(
+            *[fetch_project_commits(pid) for pid in self.project_ids]
+        )
+
+        for pid, raw_commits in results:
+            for c in raw_commits:
+                stats = c.get("stats", {})
+                raw_author = c.get("author_name", "unknown")
+                raw_email = c.get("author_email", "")
+                author = settings.normalize_author(raw_author, raw_email)
+                all_commits.append(CommitInfo(
+                    sha=c.get("id", ""),
+                    author=author,
+                    message=c.get("message", ""),
+                    created_at=self._parse_datetime(c.get("created_at")) or datetime.now(),
+                    additions=stats.get("additions", 0),
+                    deletions=stats.get("deletions", 0),
+                    files_changed=stats.get("total", 0),
+                    project_id=pid,
+                ))
+
+        logger.info(f"GitLab: 获取 {len(all_commits)} 条 Commits")
+        return all_commits
+
+    async def _fetch_all_mrs(
+        self,
+        client: httpx.AsyncClient,
+        since: datetime | None,
+        until: datetime | None,
+    ) -> list[MergeRequestInfo]:
+        """异步获取所有项目的 Merge Requests（含 diff）"""
+        all_mrs: list[MergeRequestInfo] = []
+
+        async def fetch_project_mrs(pid: int) -> list[dict]:
+            params: dict = {"state": "all"}
+            if since:
+                params["created_after"] = since.isoformat()
+            if until:
+                params["created_before"] = until.isoformat()
+            return await self._aget(client, f"/projects/{pid}/merge_requests", params)
+
+        # 并行获取所有项目的 MRs
+        results = await asyncio.gather(
+            *[fetch_project_mrs(pid) for pid in self.project_ids]
+        )
+
+        # 收集所有 MR 信息（包含项目 ID），用于后续并行获取 diff
+        mr_list: list[tuple[int, dict]] = []  # (project_id, mr_data)
+        for pid_idx, raw_mrs in enumerate(results):
+            pid = self.project_ids[pid_idx]
+            for mr in raw_mrs:
+                mr_list.append((pid, mr))
+
+        # 并行获取所有 MR 的 diff
+        async def fetch_mr_diff(pid: int, mr_iid: int) -> str:
+            try:
+                resp = await client.get(
+                    f"{self._api_base}/projects/{pid}/merge_requests/{mr_iid}/changes",
+                    headers=self._headers,
+                    timeout=30.0,
+                )
+                if resp.status_code == 200:
+                    changes = resp.json().get("changes", [])
+                    diff_parts = []
+                    for ch in changes:
+                        diff_parts.append(
+                            f"--- {ch.get('old_path', '')}\n"
+                            f"+++ {ch.get('new_path', '')}\n"
+                            f"{ch.get('diff', '')}"
+                        )
+                    return "\n".join(diff_parts)
+            except httpx.HTTPError:
+                logger.warning(f"获取 MR #{mr_iid} Diff 失败")
+            return ""
+
+        # 并行获取所有 diff
+        diff_tasks = [
+            fetch_mr_diff(pid, mr.get("iid"))
+            for pid, mr in mr_list if mr.get("iid")
+        ]
+        diff_results = await asyncio.gather(*diff_tasks)
+
+        # 组装 MR 数据
+        diff_idx = 0
+        for pid, mr in mr_list:
+            raw_author = mr.get("author", {}).get("username", "unknown")
+            mr_author = settings.normalize_author(raw_author)
+            reviewers = [
+                r.get("username", "")
+                for r in mr.get("reviewers", [])
+                if r.get("username")
+            ]
+
+            diff_text = ""
+            if mr.get("iid"):
+                diff_text = diff_results[diff_idx]
+                diff_idx += 1
+
+            all_mrs.append(MergeRequestInfo(
+                id=mr.get("id", 0),
+                title=mr.get("title", ""),
+                author=mr_author,
+                state=mr.get("state", ""),
+                created_at=self._parse_datetime(mr.get("created_at")) or datetime.now(),
+                merged_at=self._parse_datetime(mr.get("merged_at")),
+                diff=diff_text,
+                description=mr.get("description", "") or "",
+                reviewers=reviewers,
+                comments_count=mr.get("user_notes_count", 0),
+            ))
+
+        logger.info(f"GitLab: 获取 {len(all_mrs)} 条 Merge Requests（含 diff）")
+        return all_mrs
+
+    async def _fetch_all_pipelines(
+        self,
+        client: httpx.AsyncClient,
+        since: datetime | None,
+        until: datetime | None,
+    ) -> list[PipelineInfo]:
+        """异步获取所有项目的 Pipelines"""
+        all_pipelines: list[PipelineInfo] = []
+
+        async def fetch_project_pipelines(pid: int) -> list[dict]:
+            params: dict = {}
+            if since:
+                params["created_after"] = since.isoformat()
+            if until:
+                params["created_before"] = until.isoformat()
+            return await self._aget(client, f"/projects/{pid}/pipelines", params)
+
+        results = await asyncio.gather(
+            *[fetch_project_pipelines(pid) for pid in self.project_ids]
+        )
+
+        for raw_pipelines in results:
+            for p in raw_pipelines:
+                created = self._parse_datetime(p.get("created_at"))
+                finished = self._parse_datetime(p.get("updated_at"))
+                duration = 0.0
+                if created and finished:
+                    duration = (finished - created).total_seconds()
+
+                ref = p.get("ref", "")
+                source = p.get("source", "")
+                is_deploy = (
+                    ref in ("main", "master", "production")
+                    or "release" in ref
+                    or source == "deploy"
+                )
+
+                all_pipelines.append(PipelineInfo(
+                    id=p.get("id", 0),
+                    status=p.get("status", ""),
+                    created_at=created or datetime.now(),
+                    finished_at=finished,
+                    duration_seconds=duration,
+                    is_deployment=is_deploy,
+                ))
+
+        logger.info(f"GitLab: 获取 {len(all_pipelines)} 条 Pipelines")
+        return all_pipelines
+
+    async def _fetch_all_tasks(
+        self,
+        client: httpx.AsyncClient,
+        since: datetime | None,
+        until: datetime | None,
+    ) -> list[TaskInfo]:
+        """异步获取所有项目的 Issues"""
+        all_tasks: list[TaskInfo] = []
+
+        async def fetch_project_tasks(pid: int) -> list[dict]:
+            params: dict = {}
+            if since:
+                params["created_after"] = since.isoformat()
+            if until:
+                params["created_before"] = until.isoformat()
+            return await self._aget(client, f"/projects/{pid}/issues", params)
+
+        results = await asyncio.gather(
+            *[fetch_project_tasks(pid) for pid in self.project_ids]
+        )
+
+        for raw_issues in results:
+            for issue in raw_issues:
+                labels = [lbl.lower() for lbl in issue.get("labels", [])]
+                task_type = "feature"
+                if any(l in labels for l in ("bug", "fix", "hotfix")):
+                    task_type = "fix"
+                elif any(l in labels for l in ("tech-debt", "refactor", "chore")):
+                    task_type = "debt"
+                elif any(l in labels for l in ("ops", "infra", "devops")):
+                    task_type = "ops"
+
+                all_tasks.append(TaskInfo(
+                    id=str(issue.get("iid", "")),
+                    title=issue.get("title", ""),
+                    description=issue.get("description", ""),
+                    status="done" if issue.get("state") == "closed" else "open",
+                    task_type=task_type,
+                    assignee=settings.normalize_author(
+                        (issue.get("assignee") or {}).get("username", "")
+                    ),
                     created_at=self._parse_datetime(issue.get("created_at")),
                     due_date=self._parse_datetime(issue.get("due_date")),
                     completed_at=self._parse_datetime(issue.get("closed_at")),

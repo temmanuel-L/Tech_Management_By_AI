@@ -80,7 +80,7 @@ class CommitReviewItem(BaseModel):
     """单条 Commit/MR 审查结果（用于数据下钻）"""
     mr_id: int = 0
     sha: str = ""
-    author: str = ""  # 作者（来自 GitLab，可用 GITLAB_AUTHOR_ALIASES 映射）
+    author: str = ""  # 作者（GitLab username）
     message: str = ""  # Commit message 或 MR title
     diff: str = ""  # 代码 diff（可能较长）
     quality_score: int = 5
@@ -106,6 +106,8 @@ class AnalyzeResponse(BaseModel):
     created_at: str = ""
     # 用于数据下钻: LLM 审查结果（前端可缓存用于下钻页面）
     llm_reviews: list[CommitReviewItem] = []
+    # 各项目 commit 数量统计（用于 Dashboard 展示）
+    project_commit_counts: list[dict] = []
 
 
 class HistoryPointResponse(BaseModel):
@@ -139,6 +141,7 @@ class DrillDownResponse(BaseModel):
     sample_info: SampleInfo
     all_samples: list[CommitReviewItem]  # 所有被审查的 commit 列表
     filtered_items: list[CommitReviewItem]  # 符合条件的 commit（如 is_paying_debt=True）
+    total_count: int = 0  # 符合筛选条件的总数
 
 
 class TeamSizingIssueResponse(BaseModel):

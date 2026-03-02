@@ -52,9 +52,12 @@ class Settings(BaseSettings):
     GITLAB_TOKEN: SecretStr | None = None
     # 逗号分隔的项目 ID 列表, 如 "123,456"
     GITLAB_PROJECT_IDS: str = ""
+    # 项目 ID 到项目名称的映射 (可选，用于前端显示)
+    # 格式: "123:项目A,456:项目B"
+    GITLAB_PROJECT_NAMES: str = ""
     # 作者别名映射: 同一人可能在不同项目/机器用不同 git user.name
     # 格式: "别名1|别名2|别名3:规范名, 别名4|别名5:规范名2"
-    # 例: "lwh14|刘文浩|lwh:刘文浩, uyplayer|热克甫:热克甫"
+    # 例: "lwh14|刘文浩|lwh:liuwenhao, uyplayer|热克甫:rekefu"
     GITLAB_AUTHOR_ALIASES: str = ""
 
     # =========================================================================
@@ -147,9 +150,9 @@ class Settings(BaseSettings):
     # LLM 增强利息率时的权重 (0-1), 越大越偏向 LLM 判断
     TECH_DEBT_LLM_WEIGHT: float = 0.60
     # 每次分析中, 参与 LLM 抽样审查的最大 MR 数量 (异步并发, 可适当提高)
-    TECH_DEBT_LLM_MR_SAMPLE_LIMIT: int = 5
+    TECH_DEBT_LLM_MR_SAMPLE_LIMIT: int = 10
     # 每次分析中, 参与 LLM 抽样审查的最大 Commit 数量 (异步并发, 可支持几十个)
-    TECH_DEBT_LLM_COMMIT_SAMPLE_LIMIT: int = 10
+    TECH_DEBT_LLM_COMMIT_SAMPLE_LIMIT: int = 100
 
     # =========================================================================
     # 数学模型系数 — DORA 指标
@@ -285,30 +288,86 @@ class Settings(BaseSettings):
         return [int(pid.strip()) for pid in self.GITLAB_PROJECT_IDS.split(",") if pid.strip()]
 
     @property
+    def gitlab_project_names_map(self) -> dict[int, str]:
+        """
+        解析 GITLAB_PROJECT_NAMES 为 项目ID->项目名 映射
+        格式: "107:项目A,110:项目B"
+        """
+        result: dict[int, str] = {}
+        if not self.GITLAB_PROJECT_NAMES:
+            return result
+        for item in self.GITLAB_PROJECT_NAMES.split(","):
+            item = item.strip()
+            if ":" not in item:
+                continue
+            pid_str, name = item.split(":", 1)
+            try:
+                pid = int(pid_str.strip())
+                result[pid] = name.strip()
+            except ValueError:
+                continue
+        return result
+
+    @property
     def tech_debt_fix_keyword_list(self) -> list[str]:
         """将逗号分隔的关键词字符串解析为列表"""
         return [kw.strip().lower() for kw in self.TECH_DEBT_FIX_KEYWORDS.split(",") if kw.strip()]
 
-    @property
-    def author_alias_map(self) -> dict[str, str]:
+    def normalize_author(self, raw_name: str, raw_email: str = "") -> str:
         """
-        解析 GITLAB_AUTHOR_ALIASES 为 别名->规范名 映射
-        格式: "lwh14|刘文浩|lwh:刘文浩, uyplayer|热克甫:热克甫"
+        规范化作者名称，将各种可能的别名统一映射为规范名
+
+        处理逻辑：
+        1. 将 raw_name 和 raw_email 转为小写进行无差别匹配
+        2. 先尝试精准匹配别名（名字或邮箱）
+        3. 如果本身就是规范名，直接返回
+        4. 兜底返回原始值
+
+        格式: "别名1|别名2|别名3:规范名, 别名4|别名5:规范名2"
+        例: "lwh14|刘文浩|lwh:liuwenhao, uyplayer|热克甫:rekefu"
         """
-        result: dict[str, str] = {}
+        if not raw_name:
+            return "unknown"
+
+        # 如果没有配置映射，直接返回
         if not self.GITLAB_AUTHOR_ALIASES:
-            return result
-        for group in self.GITLAB_AUTHOR_ALIASES.split(","):
-            group = group.strip()
-            if ":" not in group:
-                continue
-            aliases_part, canonical = group.rsplit(":", 1)
-            canonical = canonical.strip()
-            for alias in aliases_part.split("|"):
-                alias = alias.strip()
-                if alias:
-                    result[alias] = canonical
-        return result
+            return raw_name
+
+        # 延迟构建并缓存映射表
+        if not hasattr(self, "_author_alias_cache"):
+            alias_map: dict[str, str] = {}
+            for group in self.GITLAB_AUTHOR_ALIASES.split(","):
+                group = group.strip()
+                if not group or ":" not in group:
+                    continue
+                aliases_part, canonical = group.rsplit(":", 1)
+                canonical = canonical.strip().lower()  # 规范名统一转为小写
+                for alias in aliases_part.split("|"):
+                    alias = alias.strip().lower()
+                    if alias:
+                        alias_map[alias] = canonical
+            self._author_alias_cache = alias_map
+            self._canonical_names = set(alias_map.values())
+
+        alias_map = self._author_alias_cache
+
+        # 1. 尝试匹配 raw_name（转小写）
+        name_lower = raw_name.lower()
+        if name_lower in alias_map:
+            return alias_map[name_lower]
+
+        # 2. 尝试匹配 raw_email（转小写）
+        if raw_email:
+            email_lower = raw_email.lower()
+            if email_lower in alias_map:
+                return alias_map[email_lower]
+
+        # 3. 如果本身就是规范名（存在于映射值的集合中），直接返回
+        if name_lower in self._canonical_names:
+            return name_lower
+
+        # 4. 兜底返回原始值
+        return raw_name
 
 
 # 全局单例
